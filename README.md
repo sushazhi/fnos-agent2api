@@ -129,6 +129,7 @@ fnos-agent2api/
 │   ├── make_icons.py           # 从一张主图生成四个图标文件
 │   ├── ui_hash.py              # 算/核对上游 WebUI 树哈希
 │   ├── inspect_fpk.py          # 独立复核生成的 fpk（与 build.py 不同的代码路径）
+│   ├── check_workflow.py       # 静态校验 CI workflow（needs/runs-on/版本读取）
 │   └── check_text.py           # 编码/换行/可执行位检查
 └── .local-build/               # 中间产物（gitignore）
     ├── bin/                    # 放 CI 产出的 4 个 Linux 二进制
@@ -232,6 +233,7 @@ cd fngateway; go vet ./...; go test ./...
 
 ```powershell
 python tools\inspect_fpk.py
+python tools\check_workflow.py
 python tools\check_text.py
 ```
 
