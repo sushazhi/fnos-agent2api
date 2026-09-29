@@ -207,6 +207,13 @@ agent2api-server-linux-amd64   agent2api-server-linux-arm64
 
 从 CI 的 artifact 下载后放进该目录，`python build.py` 即可离线打包。
 
+**fpk 不是逐字节可复现的** —— `fnpack` 自己写 tar 元数据（mtime/uid），gzip 层
+也带时间，包内 `manifest` 的 `checksum` 字段随之改变。所以本地重打同一个
+commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件比对确认：
+`app.tgz` 内 78 个文件的内容哈希完全一致，差异只在打包层。
+`UPSTREAM.txt` 的构建时间戳尊重 `SOURCE_DATE_EPOCH`（CI 喂的是提交时间），
+所以同一 commit 重跑时那一行不再漂。
+
 ### 3.4 构建期守卫
 
 都是「编译能过、真机才炸」的静默缺陷，所以做成硬失败：
@@ -221,6 +228,7 @@ agent2api-server-linux-amd64   agent2api-server-linux-arm64
 | `verify_upstream_version` | tag 被移动 / 镜像给了旧包 → 版本号对不上 |
 | `check_consistency` | 前缀 / socket / 端口 / 入口 / 运行用户在四处文件里不一致 |
 | `check_binaries` | 二进制缺失、不是 ELF、架构不符 |
+| CI `Verify binaries` | 二进制架构不符、glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 3 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
 
 `fngateway` 自身还有 34 个 Go 测试：
@@ -257,8 +265,27 @@ python tools\make_icons.py 主图.png
 
 ## 4. 安装与升级
 
-把 `agent2api-<版本>-<arch>.fpk` 装进飞牛应用中心即可（amd64 与 arm64 各一个
-包，按机器架构选）。安装向导会说明提供商范围、下游端口地址与凭据风险。
+### 4.1 下载现成的包（推荐）
+
+已构建好的包挂在 Release 上，按机器架构选一个：
+
+- <https://github.com/sushazhi/fnos-agent2api/releases/latest>
+
+| 架构 | 适用机型 | 包大小 |
+| --- | --- | --- |
+| `arm64` | 飞牛 ARM 机型（如瑞芯微/ARM 主板） | ≈ 8.0 MB |
+| `amd64` | x86_64 机型 | ≈ 8.5 MB |
+
+下载后校验（可选，但建议）：
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+### 4.2 安装
+
+把 `agent2api-<版本>-<arch>.fpk` 装进飞牛应用中心即可。安装向导会说明提供商
+范围、下游端口地址与凭据风险。
 
 命令行管理：
 
@@ -406,19 +433,29 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
 - `fngateway`：`go vet` 干净，`go test ./...` 34 个测试全过
   （含 HTML 改写、Cookie Path 改写、密钥生成与复用、前缀剥离/回填）
 - 上游 WebUI 溯源哈希与上游 tag 逐字节一致（`5ecf43c0…`，71 个文件）
-- 打包管线端到端跑通（用等价架构的 ELF 占位充当上游二进制）：
-  组装 → `fnpack build` → 解包自检，amd64 与 arm64 两个包均通过；
-  随后用 `tools/inspect_fpk.py` 独立复核了包内 ELF 架构、`cmd/*` 权限、
-  `ui/config` 内容与 `UPSTREAM.txt` 文案
+- 打包管线端到端跑通：组装 → `fnpack build` → 解包自检，amd64 与 arm64
+  两个包均通过；随后用 `tools/inspect_fpk.py` 独立复核了包内 ELF 架构、
+  `cmd/*` 权限、`ui/config` 内容与 `UPSTREAM.txt` 文案
 - 各构建期守卫逐个做负例注入（篡改面板字节 / 写错前缀 / manifest 塞分号 /
   删图标 / 抽掉二进制），均如期硬失败
 
+**已通过 CI 验证**（GitHub Actions，`ubuntu-22.04` 编 / `ubuntu-24.04` 打包）：
+
+- 真实上游二进制产出成功。`agent2api-server-linux-{amd64,arm64}` 分别为
+  10,297,816 B / 9,052,672 B，`rustc` 指纹存在、无 Go 占位标记
+- glibc 上限实测 **2.34**（< 飞牛的 2.36）；`NEEDED` 只有
+  `libgcc_s.so.1` / `libm.so.6` / `libc.so.6`，无 `RUNPATH`
+- Release `v2.9.0-1` 已发布，两个 fpk 与 `SHA256SUMS.txt` 可匿名下载，
+  校验和逐项核对一致
+- Rust 依赖缓存命中生效（350 MB，第二次运行恢复后重编时间明显下降）
+
 **尚未验证**：
 
-- ⚠️ **真机安装**。以上全部是本地构建期结论，**没有在真实飞牛设备上装过**。
+- ⚠️ **真机安装**。以上全部是构建期结论，**尚未在真实飞牛设备上跑起来**。
   待验证项：socket 路径与权限、`X-Trim-*` 管理员闸门、面板经网关后的渲染与
   交互、下游 `:3065/v1` 的局域网可达性。
-- ⚠️ **真实上游二进制尚未产出**。本仓库不提交二进制，需先跑一次 CI（§3.3）
-  才能拿到真正的 `agent2api-server-linux-*`；在那之前 `python build.py`
-  会在二进制预检处停下并提示去 Actions 取产物。上游二进制的体积与 glibc
-  要求由 CI 里的断言负责（须 ≤ 2.36）。
+- 真机首次安装曾暴露过一次 `exit status 1`：当时 `.local-build/bin/` 里放的是
+  Go 占位程序（1.5 MB、静态、**能通过全部 glibc/架构检查**），不是真 Rust
+  二进制。现已加两道断言（`rustc` 指纹 + 体积下限）拦住这类替身。
+  该次真机日志本身有价值：**飞牛的安装/启动/网关/停止链路是通的**，
+  失败只发生在上游二进制那一步。
