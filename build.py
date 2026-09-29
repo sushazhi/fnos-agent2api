@@ -693,6 +693,15 @@ def assemble(arch, version):
         f.write(mf)
 
     # 上游署名与许可（MIT 要求随二进制附带许可全文）
+    # 时间戳尊重 SOURCE_DATE_EPOCH（可复现构建惯例）：设了就固定，没设才用当前时间。
+    # CI 里同一个 commit 的两次打包因此得到逐字节相同的 UPSTREAM.txt。
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if epoch.isdigit():
+        build_time = datetime.datetime.fromtimestamp(
+            int(epoch), datetime.timezone.utc
+        ).isoformat(timespec="seconds")
+    else:
+        build_time = datetime.datetime.now().isoformat(timespec="seconds")
     with open(os.path.join(STAGE_DIR, "UPSTREAM.txt"), "w", encoding="utf-8") as f:
         f.write(
             "本应用内置上游 agent2api（agent2api-server）。\n\n"
@@ -700,7 +709,7 @@ def assemble(arch, version):
             f"上游版本: {UPSTREAM_TAG}\n"
             "上游许可: MIT License 正文，文件末尾附有「使用声明」\n"
             "上游版权: Copyright (c) 2026 aimod-cc\n"
-            f"构建时间: {datetime.datetime.now().isoformat(timespec='seconds')}\n\n"
+            f"构建时间: {build_time}\n\n"
             "依据 MIT 许可，源码与二进制形式的再分发均保留原始版权声明与许可声明。\n"
             "上游许可全文见同目录 LICENSE.upstream；源码可自 "
             f"https://github.com/{UPSTREAM_REPO} 获取。\n\n"

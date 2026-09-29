@@ -198,6 +198,20 @@ jobs:
                 echo "ERROR: ${name} 架构不符: 期望 '${want}', 实际 '${got}'"; fail=1
               fi
 
+              # 防「替身二进制」混进包：本地无 Rust 时曾用 Go 占位程序顶上，
+              # 它 1.5 MB、静态无依赖，**能通过下面所有 glibc 检查**，装上
+              # 真机才会 exit status 1。Rust 会把自己的编译器版本写进二进制，
+              # 拿它当指纹 + 一条体积下限，双保险。
+              if [ "${name#agent2api-server}" != "$name" ]; then
+                if ! grep -qa 'rustc' "$bin"; then
+                  echo "ERROR: ${name} 未见 rustc 标记，疑似占位/替身二进制"; fail=1
+                fi
+                if [ "$(stat -c%s "$bin")" -lt 3000000 ]; then
+                  echo "ERROR: ${name} 仅 $(stat -c%s "$bin") B，远小于真实 Rust 产物（约 9~10 MB）"
+                  fail=1
+                fi
+              fi
+
               worst=$(objdump -T "$bin" 2>/dev/null \
                         | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1 || true)
               size=$(stat -c%s "$bin")
@@ -276,6 +290,15 @@ jobs:
 
       # 与本地构建走的是同一条打包路径（build.py），CI 只负责把二进制喂进
       # .local-build/bin —— 本地与 CI 不会出现「两边包不一样」。
+      #
+      # SOURCE_DATE_EPOCH 用提交时间：build.py 写进 UPSTREAM.txt 的构建时间戳
+      # 会跟着它走，同一 commit 重跑得到同样的内容。
+      # 注意 fpk **不是**逐字节可复现的 —— fnpack 自己的 tar 元数据（mtime/uid）
+      # 与 gzip 层每次都不同，包内 manifest 的 checksum 字段也随之变。
+      # 已实测：app.tgz 内 78 个文件的内容哈希逐字节一致，差异只在打包层。
+      - name: Set reproducible timestamp
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
+
       - name: Build fpk packages
         run: python3 build.py
 
