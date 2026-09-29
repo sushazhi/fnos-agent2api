@@ -1,0 +1,32 @@
+appname               = agent2api
+version               = 2.9.0-1
+display_name          = Agent2API
+desc                  = <b>多提供商账号池 → OpenAI 兼容 API 网关</b>（基于上游 agent2api），内置官方 Web 控制台；单文件静态二进制，<b>无需 Docker、无需 Node 运行时</b>，安装即用。<br><br>🤖 <b>账号池 → 标准 API：</b><br>- 标准 <code>/v1/chat/completions</code>、<code>/v1/models</code>、<code>/v1/responses</code><br>- 多账号轮转、失败重试，本地 SQLite 持久化<br>- 内置 7 个提供商适配：WorkBuddy、小浣熊（Raccoon）、CatPaw、AutoClaw、Qoder、Cline Free、Cline Pass<br><br>🖥️ <b>官方控制台：</b><br>- 账号管理、模型中心、API 密钥、运行日志、请求记录、定时任务、对话测试台<br>- 统一网关接入，复用飞牛登录态，<b>面板无需独立登录密码</b>，仅管理员可访问<br><br>🔌 <b>下游接入：</b><br>- 独立端口 <code>http://＜飞牛IP＞:3065/v1</code>，任意 OpenAI SDK 直连（统一网关路径仅供面板访问，外部客户端走不通）<br><br>🧩 <b>运行时说明：</b><br>- 上游为 Rust 静态二进制，仅依赖 glibc（≥ 2.34），<b>不依赖应用中心 Node.js 运行时</b><br>- SQLite 以 bundled 方式静态链接，运行时无额外系统依赖<br>- 账号凭据在应用数据目录中以明文存储，请勿在多人共享设备上使用
+
+# 系统要求
+# platform 由 build.py 按目标架构改写为 x86 / arm：每个 fpk 只装一个架构的二进制。
+# 写成 all 会让另一种架构也能装上跑不起来的包。
+platform              = all
+os_min_version        = 1.2.0401
+source                = thirdparty
+
+# 开发者信息
+maintainer            = aimod-cc
+maintainer_url        = https://github.com/aimod-cc/agent2api
+
+distributor           = sushazhi
+distributor_url       = https://github.com/sushazhi/fnos-agent2api
+
+# 安装控制
+ctl_stop              = true
+
+# 下游接入端口（OpenAI 兼容客户端直连；取上游默认端口 3065，统一网关路径不给外部客户端用）
+service_port          = 3065
+checkport             = true
+
+# 桌面图标配置
+desktop_uidir         = ui
+desktop_applaunchname = agent2api.Application
+
+# 更新日志
+changelog             = v2.9.0-1<br>1.上游 agent2api v2.9.0 原样集成（零源码改动），外套飞牛网关适配层（fngateway）<br>2.统一网关接入：面板走 /app/agent2api，仅管理员可访问；网关密钥由后端注入，面板免密登录<br>3.下游独立端口 3065：标准 OpenAI 兼容接口，任意 OpenAI SDK 直连<br>4.单文件静态二进制：不依赖 Docker、不依赖 Node.js 运行时，SQLite 静态链接<br>5.内置 7 个提供商适配（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline Free / Cline Pass）<br>6.控制台自带更新入口在飞牛上不可用（无宿主机 updater），属预期降级

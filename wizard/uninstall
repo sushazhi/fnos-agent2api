@@ -1,0 +1,31 @@
+[
+  {
+    "stepTitle": "🗑️ 卸载 Agent2API 网关",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "卸载会先停止服务，然后按你的选择处理数据。"
+      },
+      {
+        "type": "radio",
+        "field": "wizard_keep_data",
+        "label": "应用数据如何处理？",
+        "initValue": "true",
+        "options": [
+          {"label": "保留数据（推荐）", "value": "true"},
+          {"label": "删除全部数据", "value": "false"}
+        ],
+        "rules": [
+          {
+            "required": true,
+            "message": "请选择数据处理方式"
+          }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "⚠️ <b>保留数据</b>：账号凭据与 API 密钥（<code>data/agent2api.db</code>）、网关密钥（<code>apikey</code>）会留在数据目录，重新安装后可继续使用。<br>🗑️ <b>删除数据</b>：连同账号凭据一起清除，<b>无法恢复</b>，需要重新登录所有账号。"
+      }
+    ]
+  }
+]

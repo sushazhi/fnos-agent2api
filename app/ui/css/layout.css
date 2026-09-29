@@ -1,0 +1,666 @@
+/* ─────────────────────────────────────────────
+   布局：应用外框 / 侧边栏 / 顶栏 / 内容区
+   ───────────────────────────────────────────── */
+
+/* ─── 应用外框 ─── */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 桌面端自定义标题栏占掉一行 32px，外框只吃剩余高度。
+   has-titlebar 由 titlebar.js 在创建标题栏时挂到 body 上 —— 网页端
+   （headless 托管面板）不创建标题栏，也就没有这个 class，布局保持 100vh 不变。 */
+body.has-titlebar .shell {
+  height: calc(100vh - var(--titlebar-h));
+}
+
+/* ─────────────────────────────
+   自定义标题栏（桌面端，titlebar.js 动态创建）
+   主窗口去掉了系统装饰（src-tauri 建窗处 decorations(false)），这里补一条
+   32px 的标题条：左侧标题、右侧最小化 / 最大化(还原) / 关闭三键。
+   形态参考 OmniProxy 的 TitleBar（Electron 版）。拖动与双击最大化用
+   Tauri 的 data-tauri-drag-region 内建支持，不用 Electron 的
+   -webkit-app-region；配色全部走 token，深浅两套主题自动适配。
+   ───────────────────────────── */
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--titlebar-h);
+  min-height: var(--titlebar-h);
+  width: 100%;
+  overflow: hidden;
+  padding-left: 12px;
+  /* 整条是拖动区：Tauri 只在「按下目标元素自身带 data-tauri-drag-region」
+     时才拖动（属性由 titlebar.js 声明在本条上），品牌区整体关掉事件
+     （见下），按下时的 target 始终落回本条 */
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--sidebar-border);
+  user-select: none;
+}
+
+/* 品牌区：图标 + 标题文案（与窗口 title 同一份文案）。纯展示，整体不吃
+   鼠标事件 —— mousedown 的 target 因此始终是 .titlebar（带拖动属性），
+   图标与文字不会挡住拖动（Tauri 的拖动判定只认按下时的目标元素）。 */
+.titlebar-brand,
+.titlebar-brand * {
+  pointer-events: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--sidebar-fg);
+  font-size: 12.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.titlebar-brand svg { display: block; flex: 0 0 auto; }
+
+.titlebar-brand .txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 三键：满高 44px 宽（Windows 标题栏惯例），不做圆角卡片 ——
+   它们贴着窗口右上角，形状就是标题栏本身的一块 */
+.titlebar-actions {
+  margin-left: auto;
+  display: flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.titlebar-btn {
+  width: 44px;
+  min-width: 44px;
+  height: 100%;
+  padding: 0;
+  flex: 0 0 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  /* 清掉通用 button 的投影与悬停位移：标题栏三键是平贴的一块色区，
+     只有底色变化（与 .nav-item / .theme-switch button 同款处理） */
+  box-shadow: none;
+  color: var(--sidebar-fg);
+  transition: background .12s ease, color .12s ease;
+}
+
+.titlebar-btn:hover:not(:disabled) {
+  background: var(--nav-hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.titlebar-btn:active:not(:disabled) { transform: none; }
+
+/* 关闭键悬停红底白叉（Windows 11 标题栏的惯例语义色） */
+.titlebar-btn.close:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 还原图标的「前一块」矩形要能遮住后面那块：填充本条底色（两套主题
+   各取各自的 --sidebar-bg，内联 SVG 里的 fill 跟着 CSS 变量走） */
+.titlebar-btn.is-maximized .fg { fill: var(--sidebar-bg); }
+.titlebar-btn.is-maximized:hover .fg { fill: var(--nav-hover); }
+.titlebar-btn svg { display: block; width: 14px; height: 14px; pointer-events: none; }
+
+/* 窄窗口：文案可能挤到三键，只留品牌图标（与侧栏 900px 收起文字同档） */
+@media (max-width: 900px) {
+  .titlebar { padding-left: 10px; }
+  .titlebar-brand .txt { display: none; }
+}
+
+/* 窄窗口（最小 820px）收起侧栏文字，只留图标 */
+@media (max-width: 900px) {
+  :root { --sidebar-w: 68px; }
+}
+
+/* ─────────────────────────────
+   侧边栏
+   ───────────────────────────── */
+.sidebar {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 12px 10px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-border);
+}
+
+/* 品牌 */
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 2px 4px 12px;
+  border-bottom: 1px solid var(--sidebar-border);
+}
+
+/* 品牌标：图形由 icons.js 注入（与应用图标 icon.png 同一造型的 SVG）。
+   这里只负责占位与对齐 —— 蓝底、圆角、箭头都在 SVG 里，
+   所以不设 background / color / font-size，避免与图形自身的配色打架。 */
+.brand-logo {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+
+/* SVG 是行内元素，垂直方向会多出一截基线间隙，压掉它 */
+.brand-logo svg { display: block; }
+
+.brand-text { min-width: 0; }
+
+.brand h1 {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .brand-text { display: none; }
+}
+
+/* 导航 */
+.nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 4px;
+}
+
+.nav-group-label {
+  padding: 8px 8px 5px;
+  color: var(--sidebar-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.nav-group-label:first-child { padding-top: 0; }
+
+@media (max-width: 900px) { .nav-group-label { display: none; } }
+
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  /* 导航项是 <button>，components.css 里通用的 button 规则会给它带上 --shadow-1，
+     与「平铺的导航列表」冲突；这里显式清掉（.seg-item 也是同样的处理）。 */
+  box-shadow: none;
+  color: var(--sidebar-fg);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  transition: background .15s ease, color .15s ease;
+}
+
+.nav-item .ico {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  /* 图标与文字同色：color 由 .nav-item 下发，这里不再降低透明度（旧代码的 .85 会让图标比文字虚） */
+  color: currentColor;
+}
+
+/* SVG 图标：尺寸由 .ico 决定，颜色跟随 currentColor（选中态自动变主题色）。
+   原来是 ◈ ☰ 这类文字符号 —— 字体字形在不同机器上粗细与基线不一致，
+   且部分会被系统当成 emoji 渲染成彩色，无法控制。 */
+.nav-item .ico svg { display: block; }
+
+/* 覆盖通用按钮悬停态，选中项仍保持独立的导航底色。 */
+.nav-item:hover:not(:disabled) {
+  background: var(--nav-hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.nav-item.active,
+.nav-item.active:hover:not(:disabled) {
+  color: var(--nav-selected-fg);
+  background: var(--nav-selected-bg);
+  border-color: var(--nav-selected-border);
+  font-weight: 600;
+}
+
+.nav-item .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.nav-item .count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--sidebar-border);
+  background: var(--surface);
+  color: var(--sidebar-fg);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.nav-item.active .count { background: var(--nav-count-bg); border-color: var(--nav-selected-border); color: var(--nav-selected-fg); }
+
+.nav-item .count:not(.muted) { border-color: var(--danger-bd); background: var(--danger-soft); color: var(--danger); }
+.nav-item.active .count:not(.muted) { background: var(--surface); }
+
+@media (max-width: 900px) {
+  .nav-item { justify-content: center; padding: 9px 0; }
+  .nav-item .label, .nav-item .count { display: none; }
+}
+
+/* 侧栏底部 */
+.sidebar-foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+/* ─── 网关状态 ───
+   常驻在侧栏底部：网关是否在监听是本工具最基础的状态，
+   不该只有切到「网关」页才能看到。
+
+   两条独立状态（进程 / 账号）：判据不同、可以任意组合，
+   拆开显示才不会出现「没登录」被说成「网关未就绪」这种误导。 */
+.sidebar-status {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 10px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--r-sm);
+  /* 侧栏整体是「陷入」的底色，状态卡用 --surface 抬起来，两种主题下都是凸起的一层 */
+  background: var(--surface);
+  color: var(--sidebar-fg);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.sidebar-status .txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 异常时的出口按钮：只在端口冲突且能靠结束进程解决时露出（见 app.js）。
+   侧栏只有 216px，两个按钮并排会挤成两行，所以允许换行、各自尽量占满宽度。 */
+.status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.status-actions button {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* 状态灯：绿=在监听 / 红=未就绪 / 灰=未知或已停止 */
+.live {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+
+.live.pulse { animation: live-pulse 2.4s ease-in-out infinite; }
+.live.bad { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 20%, transparent); }
+.live.off { background: var(--text-3); box-shadow: none; animation: none; }
+
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--ok) 6%, transparent); }
+}
+
+/* 窄侧栏只留状态灯；按钮文字太长，一并收起（此时状态灯的颜色仍能提示异常） */
+@media (max-width: 900px) {
+  .sidebar-status { padding: 8px 6px; align-items: center; }
+  .status-line { justify-content: center; }
+  .sidebar-status .txt { display: none; }
+  .status-actions { display: none; }
+}
+
+.theme-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--sidebar-border);
+  background: var(--control-bg);
+}
+
+.theme-switch button {
+  flex: 1 1 0;
+  padding: 4px 4px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  /* 同样要清掉通用 button 的投影：只有选中的那一档才该浮起来 */
+  box-shadow: none;
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: background .15s ease, color .15s ease;
+}
+
+/* 同样是给通用 button:hover 让路的问题：这里补 :not(:disabled) 提高特异性，
+   再排除 .active，让悬停已选中的档位时保持不变（否则会被盖成灰底）。 */
+.theme-switch button:hover:not(:disabled):not(.active) { background: var(--nav-hover); color: var(--text); }
+
+.theme-switch button.active,
+.theme-switch button.active:hover {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+
+@media (max-width: 900px) {
+  .theme-switch { flex-direction: column; }
+  .theme-switch button { font-size: 0; padding: 6px 0; }
+  .theme-switch button::after { font-size: 11px; }
+  .theme-switch button[data-mode="system"]::after { content: "自动"; }
+  .theme-switch button[data-mode="light"]::after { content: "浅"; }
+  .theme-switch button[data-mode="dark"]::after { content: "深"; }
+}
+
+/* ─────────────────────────────
+   主区域
+   ───────────────────────────── */
+.main {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 顶栏 */
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-h);
+  /* 与 .content-inner 用同一套「居中后左右留白」算法，让面包屑和内容左边缘对齐：
+     内容区超过上限时内层会居中，顶栏必须跟着让出同样的留白，否则两者错开。 */
+  padding: 0 max(var(--pad), calc((100% - var(--content-max)) / 2));
+  /* 顶栏不占一层表面：直接透出内容画布，只用一条极淡的底边与内容分隔，
+     视觉重量全部让给内容与卡片（侧栏才是唯一有底的区域）。 */
+  border-bottom: 1px solid var(--hairline);
+  background: transparent;
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.crumb .sep { opacity: .5; }
+
+.crumb .cur {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.topbar-actions { display: flex; align-items: center; gap: 7px; }
+
+@media (max-width: 900px) {
+  .topbar-actions .badge.optional { display: none; }
+}
+
+/* 内容滚动区 */
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--pad) var(--pad) 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 内容区居中容器：达到 --content-max 后停止变宽并水平居中 */
+.content-inner {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 注意：这里不按页面覆盖 --content-max。内容区宽度是全站统一的版式基线，
+   任何页面（含账号页）都沿用 tokens.css 的默认限宽居中。 */
+
+.page { display: none; }
+
+/* 普通页面：页面内滚动 */
+.page.active {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 20px;
+  /* 各页面的列表都是「整表重建」式重绘（tbody.innerHTML 整体替换）。
+     滚动锚定（overflow-anchor）在这种重建下会把锚点算到被移除的节点上，
+     补偿出一个莫名的滚动位移 —— 用户点一个开关，页面自己跳一大截。
+     这里统一禁用：重绘不改变视口，滚动位置严格保持。 */
+  overflow-anchor: none;
+}
+
+/* 页头：标题 + 一句话说明 */
+/* 页面头（标题 + 一句描述）已按需求整体移除：标题在顶栏面包屑里已有，
+   描述是读过一次就不再看的说明文字，占着页面最贵的一行。
+   各页需要长期可见的说明各自收在面板的表尾（.panel-foot）里。 */
+/* ─── 面板 ─── */
+.panel {
+  position: relative;
+  margin-bottom: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+  /* 这里只需要「按圆角裁掉子内容」，不是滚动：hidden 会把面板变成滚动容器，
+     模型表（tbody 整体重绘）触发浏览器的滚动锚定补偿时，面板会被滚走一大截
+     且永远没人把它滚回来（面板头 / 工具栏 / 表头全被卷出视野，看起来像坍缩）。
+     clip 是纯裁剪、不可滚动；老内核不认识 clip 时回退到 hidden，行为同旧版。 */
+  overflow: hidden;
+  overflow: clip;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
+  flex-wrap: wrap;
+}
+
+.panel-head h2 { font-size: 13.5px; font-weight: 650; }
+.panel-head .panel-sub { color: var(--text-3); font-size: 11.5px; }
+.head-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.panel-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+/* 面板底注：说明文字收在底部灰条里，不抢主内容 */
+.panel-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--hairline);
+  /* 卡内下沉条：--surface-inset 在两套主题里都比卡片主体（--surface）低一档，
+     浅色下近白略灰、深色下比卡片更深，收敛方向一致（--surface-2 在深色下会反过来变亮）。 */
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  flex-wrap: wrap;
+}
+
+.panel-foot .spacer { flex: 1 1 auto; }
+
+/* ─── 通用表格页脚（islands/table-shell.tsx 的 TableFooter）───
+   五张表的页脚共用：左边是各页原有的说明文字（leading），右边是
+   「共 N 条 · 当前第 a–b 条 / 每页条数 / 跳页 / 翻页器」这一组控件。
+   说明长到一行放不下时整组控件换到第二行，margin-left: auto 保住右对齐；
+   控件之间 gap 7px 而不是继承 .panel-foot 的 10px：这一组里有「每页 X 条」
+   这种小字夹在控件中间，10px 会显得散。 */
+.table-foot-bar { row-gap: 6px; }
+.table-foot-ctl {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  /* 窄窗口下这一组自己换行（外层的 .panel-foot 负责「整组落到第二行」）：
+     不换的话它会把整条页脚顶出横向滚动 —— 组里有五件东西，总宽不小 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* 读数与相邻的说明文字同一档颜色；数字用等宽，翻页时宽度不跳 */
+.table-foot-count {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.table-foot-size,
+.table-foot-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* 账号页：占满剩余高度，滚动只发生在列表内部 */
+.page.active[data-page="accounts"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 这里曾把底部内边距归零以榨干高度，代价是贴底的面板页脚条（.table-foot）
+     直接顶到窗口下缘、视觉上被压住；且 .content 的 padding 底部本就是 0，没有兜底。
+     补回与左右留白同源的 --pad：只让出一点呼吸空间，外框仍由 flex:1 + min-height:0
+     锁死、滚动依旧只发生在列表内部，不产生新的页面级滚动条。 */
+  padding-bottom: var(--pad);
+}
+
+.page[data-page="accounts"] .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.page[data-page="accounts"] .account-table { flex: 1; min-height: 120px; }
+
+/* 日志页 / 请求日志页：与账号页同一套范式 —— 页面占满剩余高度，滚动只发生在列表内部。
+   几百条日志整页滚动时，筛选行和分页栏会跟着滚出视野，翻页要来回滚，
+   「第几页」也看不见，所以这里必须锁死外框、只让列表滚。 */
+.page.active[data-page="logs"],
+.page.active[data-page="requests"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 同上：底部内边距归零会让分页栏/页脚条紧贴窗口下缘，补回 --pad 留出呼吸空间；
+     这段留白从列表可视高度里让出（面板 flex:1 自适应），锁高结构不受影响。 */
+  padding-bottom: var(--pad);
+}
+
+/* 定时任务页：同一套范式。任务是若干张卡片，条数随功能增加而变多
+   （现在已是六条 + 自动签到），整页滚动会让页头的「刷新」与面板头的徽标
+   一起滚出视野 —— 滚动只留在任务列表里，页头与页脚条常驻。 */
+.page.active[data-page="tasks"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 同日志页：给底部留出呼吸空间，这段留白从列表可视高度里让出 */
+  padding-bottom: var(--pad);
+}
+
+.page[data-page="tasks"] .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.page[data-page="tasks"] .panel-head,
+.page[data-page="tasks"] .panel-foot { flex: none; }
+
+/* 面板体只是包裹层，真正滚动的是里面的 .task-list（与日志页把滚动放在 .log-list
+   上同一套做法）：面板内边距因此留在滚动区之外，卡片滚到底不会贴着面板边框。 */
+.page[data-page="tasks"] .panel-body { flex: 1; min-height: 0; }
+
+.page[data-page="logs"] .panel,
+.page[data-page="requests"] .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+/* 页头 / 筛选行 / 分页栏都不参与伸缩，只有列表吃掉剩余高度 */
+.page[data-page="logs"] .panel-head,
+.page[data-page="logs"] .panel-foot,
+.page[data-page="requests"] .panel-head,
+.page[data-page="requests"] .panel-foot { flex: none; }
+
+.page[data-page="logs"] .panel-body,
+.page[data-page="requests"] .panel-body { flex: 1; min-height: 0; }

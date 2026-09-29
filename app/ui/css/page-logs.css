@@ -1,0 +1,222 @@
+/* ─────────────────────────────────────────────
+   日志页：系统事件时间线
+   （网关转发明细已拆到「请求日志」页，表格样式在 page-requests.css；
+   本文件的 .log-filters / .log-list 等容器声明两页共用。分页栏已并入
+   通用表格页脚 —— 见 islands/table-shell.tsx 与 layout.css 的 .table-foot-ctl，
+   原先的 .log-pager 一族随组件化的 Pager 一起退场。）
+   颜色一律取 tokens.css 的语义变量，浅色深色共用同一组声明。
+   ───────────────────────────────────────────── */
+
+.log-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  /* 高度由内容决定：只剩列表该伸缩，筛选行不被压缩 */
+  flex: none;
+}
+
+.log-filters select { width: auto; min-width: 120px; }
+
+/* 关键词输入框是这一行唯一的弹性项：它吃掉剩余宽度，其余控件定宽。
+   basis 从原先的 180px 收到 140px —— 新增的时间档位占掉约 235px，
+   默认窗口（1060px、内容区约 772px）下这一行本来就贴着边：
+   按 180px 算，输入框会被压到小于自身 min-content 而硬顶出换行；
+   140px 仍放得下十来个汉字，也让「今天」这档在窄一点的窗口下才换行。
+   min-width 必须显式写：search 框不给的话，flex 收缩会被它自身 size 属性
+   算出的 min-content 卡住，收缩量不受控。 */
+.log-filters input[type="search"] { flex: 1 1 140px; min-width: 120px; }
+/* 筛选行右侧的读数（当前档位 + 状态口径；请求日志页的 #req-summary 同用） */
+.log-filters .panel-sub {
+  color: var(--text-3);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* 窄窗口：页头的视图切换与自动刷新整行铺开，与报表页的时间范围同款处理
+   （那里是 #report-range 折行）。不折的话两段控件会压在标题文案上换行，
+   标题与 intro 各自占一行，读起来像断了半句。 */
+@media (max-width: 900px) {
+  .page[data-page="logs"] .panel-head .head-actions {
+    flex-basis: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+}
+
+.log-list {
+  display: flex;
+  flex-direction: column;
+  /* 日志页整页不滚：列表吃掉筛选行与页脚之间的剩余高度，滚动只发生在这里 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  /* 承载整列日志的容器，跟面板同档的大圆角 */
+  border-radius: var(--r-lg);
+  background: var(--table-bg);
+}
+
+/* 单条日志：左侧级别圆点 + 竖线，右侧时间 */
+.log-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--hairline);
+  transition: background .12s ease;
+  /* 列表是 flex 列容器：条目不许被压缩，超出的一律交给列表滚动 */
+  flex: none;
+}
+
+.log-row:last-child { border-bottom: none; }
+.log-row:hover { background: var(--row-hover); }
+
+/* 左侧导轨 */
+.log-rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding-top: 4px;
+}
+
+/* 竖线从圆点光环下方（4 + 7 + 3）起，画到下一行的分隔线为止：
+   bottom 抵消本行的下内边距 + 1px 分隔线，行内边距改了这里要跟着改。 */
+.log-rail::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  bottom: -12px;
+  width: 1px;
+  background: var(--hairline);
+}
+
+.log-row:last-child .log-rail::after { display: none; }
+
+.log-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--text-3);
+  /* 光环取列表底色，圆点才像从轨道上「挖」出来的；悬浮时底色换成行底色 */
+  box-shadow: 0 0 0 3px var(--table-bg);
+}
+
+.log-row:hover .log-dot { box-shadow: 0 0 0 3px var(--row-hover); }
+.log-dot.info { background: var(--info); }
+.log-dot.warn { background: var(--warn); }
+.log-dot.error { background: var(--danger); }
+.log-dot.debug { background: var(--border-strong); }
+
+.log-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* 分类标签 */
+.log-cat {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.log-row.warn .log-cat { background: var(--warn-soft); border-color: var(--warn-bd); color: var(--warn); }
+.log-row.error .log-cat { background: var(--danger-soft); border-color: var(--danger-bd); color: var(--danger); }
+
+/* 级别徽章：淡底 + 描边 + 深字，与分类标签并排等高于一行 */
+.log-lvl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 7px;
+  /* 先给一层透明描边占位：四个级别切换时尺寸不跳 */
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.log-lvl.info { color: var(--info); background: var(--info-soft); border-color: var(--info-bd); }
+/* debug 没有专属语义色，用文字色 + 中性面 + 常规描边凑成同一套三件套 */
+.log-lvl.debug { color: var(--text-3); background: var(--surface-3); border-color: var(--border); }
+.log-lvl.warn { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-bd); }
+.log-lvl.error { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-bd); }
+
+/* 正文用等宽：日志里混着账号 ID、路径、端点，列对齐了才扫得快 */
+.log-row .msg {
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* 附加数据：结构化后的关键信息，独立成行更易扫读 */
+.log-extra-wrap { display: flex; min-width: 0; }
+
+.log-row .extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.log-row .time {
+  padding-top: 2px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 级别底色：轻微着色，不干扰阅读 */
+.log-row.warn { background: color-mix(in srgb, var(--warn-soft) 45%, transparent); }
+.log-row.error { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
+.log-row.warn:hover { background: var(--warn-soft); }
+.log-row.error:hover { background: var(--danger-soft); }
+
+.log-empty {
+  /* 与组件层的 .empty 保持同一档留白，两者是同一种空态 */
+  padding: 30px 16px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* 列表现在撑满可用高度，空态若还贴着顶端会显得像渲染失败：居中成一条提示 */
+.log-list > .log-empty:only-child { margin: auto; }

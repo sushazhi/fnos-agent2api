@@ -1,0 +1,296 @@
+
+/* 批量栏的「按提供商计数」摘要（`WorkBuddy 14 · 小浣熊 3`）：紧跟在「共 N 个」
+   之后，同色系，**只列有账号的家**；窄窗口允许省略 —— 它只是补充信息，
+   含「暂无账号」那些家的完整清单在工具条的提供商下拉里。 */
+.provider-summary {
+  max-width: 40%;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 工具条里注入的提供商下拉：模型下拉才需要「重一档」（它决定队列口径），
+   这里只给最小宽度，免得 label 被压成一两个字 */
+#account-provider-filter { min-width: 132px; }
+
+/* ─── 添加账号弹窗的提供商分叉（结构由 account-panel.js 注入）─── */
+.add-provider-block[hidden] { display: none; }
+.add-provider-block { display: flex; flex-direction: column; gap: 16px; }
+
+/* 第 2 步住自己的弹窗（#add-form-modal），叠在列表弹窗之上：点卡片弹出来、
+   关掉它回到列表 —— 不再是把列表弹窗的内容整体换掉。
+   层级压过列表弹窗（同为 .modal-mask 的 30）而低于确认框（38）：表单里点
+   「删除此提供商」时，确认框要盖在这两层之上。
+   宽度用通用 .modal 的 620px，**不跟着列表弹窗放宽**：这一层是表单，
+   输入框横跨 800px 只是把字拉散（标签列到控件之间空出一大片），620 正是
+   改造前所有弹窗的宽度，各家表单都是按它排的。窄一档顺带强化层叠感 ——
+   下面的列表弹窗在四周露出一圈，一眼看出这是浮在上面的一层。 */
+#add-form-modal { z-index: 32; }
+/* 第 1 步：提供商卡片列表（家数动态：注册表加一家就多一张，自定义家建一家多一张） */
+/* 分段与搜索同一行：左半边选「给什么形态的上游加账号」，右半边是这一屏的过滤器。
+   两者都是这一屏的顶栏控件，各占一行会把卡片列表往下压一屏。
+   搜索框带基准宽度（flex-basis）：窗口窄到装不下两者时它整条掉到第二行，
+   而不是把分段挤成换行的两排 —— 分段一换行列表就少显示一行。 */
+.add-pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+/* 带 #add-modal 前缀压过 components.css 的 `.input-affix { flex: 1 1 auto }
+
+`：
+   基准宽度由这里定，窄窗口下掉行的是搜索框整条。
+   margin-left: auto 把剩余空间全推进「分段与搜索之间」—— 弹窗加宽到 880px 后
+   搜索框若跟着长到近 600px 会像一条通栏输入框，封顶 340px 并靠右，与卡片区
+   右边缘对齐。 */
+#add-modal .add-pick-row > .add-provider-search {
+  flex: 1 1 200px;
+  max-width: 340px;
+  min-width: 0;
+  margin-left: auto;
+}
+.add-provider-search .input { padding-left: 30px; }
+.add-provider-grid {
+  display: grid;
+  /* 240 起步：880px 弹窗（809px 网格）下稳定三列，窄窗口自动两列、再窄一列。
+     下限压到 240 而不是 258：窗口比 928px 略窄时（弹窗开始被 100% 顶掉宽度）
+     还能多撑一会儿三列，而不是立刻掉到两列。 */
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  /* 列表高度固定为五行的自然高度（卡片 84px × 5 + 间距 12 × 4 = 468px）：
+     切换账号类型分段只换列表内容，弹窗高度恒定 —— 家数多的分段（预置 API
+     二十家，三列七行）在列表内滚动，而不是把整个弹窗撑高。三列下反代段八家
+     占三行、底下空两行 —— 「一行三个」+「高度恒定」下这空行避不开（各段家数
+     不同，8 家在 5 行的画框里除不尽），换来的是预置段一眼能看十五家。
+     改卡片内边距 / 字号 / logo 尺寸后这个值要跟着调（3 列 × 5 行放满即为准）。
+     窗口高度不够时（内容高约 650px，视口低于约 700px 就会顶到上限）
+     .modal 的 max-height 会接管，body 内部滚动而不是溢出屏幕。 */
+  height: 468px;
+  overflow-y: auto;
+  /* 行按自然高度从顶部排，不拉伸填满容器 —— grid 默认 align-content: stretch
+     会把行高摊到容器高度上：自定义段只有一两行卡时，每张卡会被拉成两百多像素
+     （行少 = 摊得多）。固定高度只是「高度上限的画框」，不是「必须填满」。 */
+  align-content: start;
+  /* 滚动条槽常驻预留：预置 API 段有滚动条、反代段没有，不预留的话切换分段时
+     卡片的宽度会跟着滚动条出现/消失跳一下（与账号页分组列表同一手法） */
+  scrollbar-gutter: stable;
+}
+.add-provider-card {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  /* 覆盖全局 `button { height: 30px }
+
+`：卡片高度由内容（logo + 两行文字）决定，
+     否则会被压成 30px —— 卡片本身是 <button>，那条规则直接命中 */
+  height: auto;
+  /* 弹窗加宽后卡片跟着放开一档（内边距 / logo / 字号）：三列的卡片比原来的
+     两列窄 6px，靠纵向的余量补回体量，也让第 1 步的高度对得起 880px 的宽度 */
+  padding: 20px 22px;
+  text-align: left;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
+}
+.add-provider-card:hover { border-color: var(--primary-bd); background: var(--primary-soft); }
+.add-provider-card:focus-visible { box-shadow: var(--ring); }
+/* 「新建」那张卡与别家同宽（一格），只靠虚线框与浅底色区分「动作」与「选择」。
+   原先它横跨整行 —— 那时说明文案（「接入一个 OpenAI / Anthropic 兼容的上游」）
+   挤在单列宽度里会折成两行；文案收短后与别家一样是一行名 + 一行说明，没有
+   再横跨的理由，横跨还会把「新建」顶成视觉上的第一梯队。 */
+.add-provider-card.is-new { border-style: dashed; background: var(--surface-2); }
+.add-provider-logo {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(150deg, var(--primary), color-mix(in srgb, var(--primary) 62%, #0b1020));
+}
+.add-provider-logo.is-new {
+  background: var(--surface-3);
+  color: var(--text-2);
+  border: 1px dashed var(--border-strong);
+  font-weight: 600;
+}
+/* 真实图标（取自各客户端安装目录内嵌的图标）：图片填满徽章。字母底的渐变
+   必须去掉 —— 图形四角透明，留着会透出蓝底；圆角与外壳一致，图自带圆角
+   与不带都自然 */
+.add-provider-logo.has-icon { background: none; }
+.add-provider-logo.has-icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  object-fit: contain;
+}
+.add-provider-info { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.add-provider-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.add-provider-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.add-provider-go { flex: 0 0 auto; color: var(--text-3); font-size: 17px; }
+.add-provider-empty {
+  grid-column: 1 / -1;
+  padding: 22px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* ─── 「导入」段：cc-switch 等工具的扫描结果 ───
+   面板顶替卡片网格的位置（互斥显隐），列表高度与网格同一上限 —— 弹窗高度
+   锁定后它内部滚动，总高不随条目数变。 */
+#add-import-panel { display: flex; flex-direction: column; gap: 8px; }
+#add-import-panel[hidden] { display: none; }
+#add-import-status { font-size: 12px; color: var(--text-2); }
+#add-import-status .add-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#add-import-status .linkish {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-3);
+}
+#add-import-status .linkish:hover { color: var(--text); background: var(--surface-3); }
+.add-import-empty p { margin: 0 0 8px; line-height: 1.6; }
+#add-import-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 468px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.add-import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .14s ease, background .14s ease;
+}
+.add-import-row:hover { border-color: var(--primary-bd); background: var(--primary-soft); }
+/* 灰显行：不可导入（不支持 / 本地已存在 / 导入失败）——有原因说明，不给勾选框 */
+.add-import-row.disabled {
+  cursor: default;
+  opacity: .55;
+}
+.add-import-row.disabled:hover { border-color: var(--border); background: var(--surface); }
+.add-import-row input[type="checkbox"] { flex: 0 0 auto; width: 15px; height: 15px; }
+.add-import-dash { flex: 0 0 auto; width: 15px; text-align: center; color: var(--text-3); }
+.add-import-dash::before { content: "—"; }
+.add-import-info { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 3px; }
+.add-import-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.add-import-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border-strong);
+  color: var(--text-3);
+}
+.add-import-meta {
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-foot-hint { flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--text-3); }
+.add-foot-hint.err { color: var(--danger); }
+.add-foot-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.add-foot-actions > button[hidden] { display: none; }
+
+/* ─── 添加账号弹窗：表单网格（标签列定宽右对齐）───
+   .field-row 是「标签自然宽度 + 控件吃剩余」，四个标签宽窄不一，四个控件的左边缘
+   就四段锯齿 —— 这是表单看着散的主因。这里改成两列网格：标签列定宽 88px、右对齐，
+   控件一律落在同一条竖线上。行高 30 与全局控件同高，标签设成等高再垂直居中，
+   基线就和输入框里的文字对齐了。 */
+.add-form { display: flex; flex-direction: column; gap: 13px; }
+.add-field {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: start;
+  gap: 5px 12px;
+}
+.add-field > label {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  height: 30px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+/* 必填只标一枚星号，不把「（必填）」塞进标签：后者让四行标签的字重与长度都不齐 */
+.add-field > label .req { color: var(--danger); font-style: normal; font-weight: 700; }
+.add-field > input,
+.add-field > select,
+.add-field > textarea { grid-column: 2; grid-row: 1; width: 100%; max-width: none; }
+/* 帮助文字常驻在控件下方（不用 placeholder —— 一输入就没了）。
+   字号 / 行高沿用 components.css 的 .hint（与设置页那些字段说明同一档），
+   这里只管把它放到控件列下面，不缩到标签列里去 —— 与 page-settings.css 的
+   `.retention-row > .hint` 是同一手法。 */
+.add-field > .hint { grid-column: 2; grid-row: 2; }
+
+/* 区块头：一行区块名 + 一行用途说明。区块名取「上游信息」这类**部位名**，
+   不再复述弹窗标题 —— 原来卡内 h3、弹窗标题、下面段落三层说同一句话。 */
+.add-panel-head { display: flex; flex-direction: column; gap: 4px; }
+.add-panel-head > span { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.add-panel-head b { color: var(--text); font-weight: 620; }
+/* 纵向表单行（token / refreshToken）：标签在上、输入框占满整宽 ——
+   这些值很长，横排会把输入框压成一条缝 */
+.field-row.stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.field-row.stack > label { color: var(--text-2); font-size: 12.5px; }
+.field-row.stack textarea { width: 100%; min-height: 0; font-family: var(--font-mono); font-size: 11.5px; }
+
+/* 行内文字链接（「小浣熊客户端登录态文件」）：点了在弹窗里显示完整路径 */
+.raccoon-hint-link { color: var(--primary-fg); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+/* 自定义提供商管理弹窗的列表（.cp-*）曾在这里：那颗「自定义提供商」按钮与
+   弹窗已整体移除（模型清单统一到「模型管理」页，编辑与删除搬进账号设置的
+   「提供商」一段），相关规则随之删除。 */
+

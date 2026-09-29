@@ -1,0 +1,18 @@
+#!/bin/bash
+# cmd/config_callback - 应用配置后置。
+#
+# 本应用的可调项全部在控制台内（账号、模型、密钥、代理、定时任务等），
+# 应用设置向导不写入任何配置文件，这里只需确认数据目录完整。
+
+set -u
+
+echo "正在应用配置..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+
+# 幂等补齐目录（覆盖早期版本可能缺失的场景）。
+mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/home" 2>/dev/null
+chmod 700 "${DATA_DIR}/data" 2>/dev/null
+
+echo "配置完成。（应用内设置请在控制台修改，保存后按提示重启应用生效）"
+exit 0

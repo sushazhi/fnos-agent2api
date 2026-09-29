@@ -1,0 +1,31 @@
+#!/bin/bash
+# cmd/uninstall_callback - 卸载后置：按向导选择决定是否删除数据。
+#
+# 安全原则：默认**保留**用户数据（账号凭据很宝贵，误删代价高）。
+
+set -u
+
+echo "正在卸载 Agent2API 网关..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+KEEP_DATA="${wizard_keep_data:-true}"
+
+case "$KEEP_DATA" in
+    false|0|no)
+        echo "按选择删除应用数据目录: ${DATA_DIR}"
+        # 只删除本应用明确拥有的数据目录，绝不越界。
+        if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != "/" ] && [ -d "$DATA_DIR" ]; then
+            rm -rf "${DATA_DIR:?}"
+        fi
+        ;;
+    *)
+        echo "已保留应用数据目录: ${DATA_DIR}"
+        echo "（含 ${DATA_DIR}/data/agent2api.db 内的账号凭据与密钥，重新安装后可直接继续使用）"
+        ;;
+esac
+
+# 清理 socket（应用目录会被系统回收，这里只是提前清理避免残留）。
+rm -f "${TRIM_APPDEST}/agent2api.sock" 2>/dev/null
+
+echo "卸载完成"
+exit 0

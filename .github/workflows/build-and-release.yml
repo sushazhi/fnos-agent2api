@@ -1,0 +1,338 @@
+name: Build and Release Agent2API for fnOS
+
+# 构建 fnOS 应用包（.fpk）并挂到 GitHub Release 上。
+#
+# ── 这个仓库里有什么、缺什么 ──────────────────────────────────
+# 本仓库只有**飞牛适配层**（fngateway 反向代理、cmd/ 生命周期脚本、config/、
+# wizard/、manifest、桌面入口与图标）以及上游 WebUI 的一份副本（app/ui/）。
+# 它**不含**上游 Rust 源码 —— 上游 agent2api 是 Rust 单文件二进制，且上游
+# Release 只发 macOS/Windows 桌面安装包，**不发 Linux 二进制**。
+#
+# 所以 CI 干两件事：
+#   1. binaries job: 拉上游 tag 源码 → 编 Linux 二进制（amd64 + arm64）
+#   2. package job : 把二进制喂进 build.py → 出 fpk
+# 本地开发不必装 Rust —— 二进制由这里产出，再下载到 .local-build/bin/。
+#
+# ── 为什么 runner 是 ubuntu-22.04 而不是 ubuntu-24.04 ───────────
+# glibc 兼容性是这里唯一的硬约束：二进制在哪个 glibc 上编，就要求目标机
+# glibc ≥ 那个版本。飞牛 fnOS 1.2.x 基于 Debian 12 (bookworm) = glibc 2.36。
+#   ubuntu-22.04 → glibc 2.35   ✅ 低于 2.36，安全
+#   ubuntu-24.04 → glibc 2.39   ❌ 编出来的二进制在飞牛上可能直接
+#                                  "version `GLIBC_2.38' not found"
+# 这个坑不会在构建期报错，只在真机启动时炸，所以下面有 glibc 断言
+# （Verify binaries），把「runner 镜像悄悄升级」这种漂移变成构建期硬失败。
+# package job 不产二进制，跑在 ubuntu-24.04 上无所谓。
+#
+# ── 触发方式 ──────────────────────────────────────────────────
+#   · workflow_dispatch：手动触发，产物作为 artifact 下载，不发布 Release
+#   · push tag v*：构建 + 发布 Release（含 fpk 与 SHA256SUMS.txt）
+#   · pull_request：只构建，不发布
+#
+# ── 发布用的凭据 ──────────────────────────────────────────────
+# 用 Actions 内置的 secrets.GITHUB_TOKEN，不需要额外配 PAT —— 顶层
+# permissions: contents: write 已经给它 Release 写权限。
+
+on:
+  push:
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 1
+  # 上游源码解到这里（.local-build/ 已在 .gitignore 中）
+  SRC_DIR: .local-build/upstream-src
+  TARGET_DIR: target
+
+jobs:
+  # ── 编 Linux 二进制（amd64 + arm64）──────────────────────────
+  binaries:
+    name: Build Linux binaries
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read version from manifest
+        run: |
+          APP_VERSION=$(grep '^version[[:space:]]*=' manifest | sed 's/^version[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]')
+          if [ -z "$APP_VERSION" ]; then
+            echo "ERROR: Failed to read version from manifest"
+            exit 1
+          fi
+          echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+          echo "APP_VERSION=${APP_VERSION}"
+
+      # fngateway 是纯标准库 Go 程序，CGO_ENABLED=0 即纯静态，
+      # 目标机 glibc 版本与它无关。
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # arm64 走交叉编译（见下），需要先把 target 装上
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # 上游源码只取固定 tag（不取 master —— 上游发布节奏很快）。
+      # build.py 内置 codeload 直连 + 两个 GitHub 镜像兜底。
+      # 这里只用它的 fetch_upstream()（--sync-upstream 同时会同步 app/ui，
+      # 那是打包 job 的活；二进制 job 只需要 src-tauri）。
+      - name: Fetch upstream source
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          import build
+          build.fetch_upstream()
+          PY
+          test -d "${SRC_DIR}/desktop-tauri/src-tauri" || {
+            echo "ERROR: 上游源码未就位 (${SRC_DIR})"; exit 1; }
+
+      # 缓存 Rust 依赖：冷编译约 10 分钟，命中后只剩源码层重编。
+      # 源码在 SRC_DIR 下，target 由 --target-dir 显式指定在仓库根。
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .local-build/upstream-src/desktop-tauri/src-tauri -> target
+
+      # arm64 需要 aarch64 的 C 工具链与 glibc 开发头文件 ——
+      # rusqlite 的 bundled SQLite 与 ring 的 C/汇编源码要用 C 编译器。
+      # libc6-dev-arm64-cross 只是 gcc-aarch64-linux-gnu 的 Recommends，
+      # --no-install-recommends 下必须显式列出，否则编 C 代码时会捡到
+      # 宿主的 /usr/include 头文件而报错。
+      - name: Install arm64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Build fngateway (Go, both arches)
+        run: |
+          cd fngateway
+          mkdir -p ../.local-build/bin
+          export CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=mod
+          for arch in amd64 arm64; do
+            echo "==> fngateway linux/${arch}"
+            GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${APP_VERSION}" \
+              -o "../.local-build/bin/fngateway-linux-${arch}" .
+            ls -l "../.local-build/bin/fngateway-linux-${arch}"
+          done
+
+      # 只编 server crate（网关本体）。上游仓库里有两个 crate，另一个是
+      # Tauri 桌面端，Linux 下要 webkit2gtk 一整套系统库 —— headless 一个
+      # 都不用，所以 `-p agent2api-server` 明确只编它。amd64 原生 / arm64
+      # 交叉，不进 QEMU（与上游 Dockerfile 同一套做法）。
+      # --target-dir 显式指定，避免受上游 .cargo/config.toml 的 target-dir
+      # 相对路径影响。
+      - name: Build agent2api-server (Rust, both arches)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: |
+          cd "${SRC_DIR}/desktop-tauri/src-tauri"
+          BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
+          TGT="${GITHUB_WORKSPACE}/${TARGET_DIR}"
+          mkdir -p "$BIN_DIR"
+
+          echo "==> agent2api-server linux/amd64 (native)"
+          cargo build --release --locked -p agent2api-server --target-dir "$TGT"
+          cp "$TGT/release/agent2api-server" "$BIN_DIR/agent2api-server-linux-amd64"
+
+          echo "==> agent2api-server linux/arm64 (cross)"
+          cargo build --release --locked -p agent2api-server \
+            --target aarch64-unknown-linux-gnu --target-dir "$TGT"
+          cp "$TGT/aarch64-unknown-linux-gnu/release/agent2api-server" \
+             "$BIN_DIR/agent2api-server-linux-arm64"
+
+          ls -l "$BIN_DIR"
+
+      # 二进制自检：ELF 架构对不对、要求的 glibc 有没有超过飞牛的 2.36。
+      # 这两项错了都不会在构建期报错，只在真机上「装完起不来」。
+      - name: Verify binaries (arch + glibc)
+        run: |
+          set -e
+          MAX_GLIBC="2.36"   # 飞牛 fnOS 1.2.x = Debian 12 bookworm
+
+          expect_machine() {
+            case "$1" in
+              amd64) echo "Advanced Micro Devices X86-64" ;;
+              arm64) echo "AArch64" ;;
+            esac
+          }
+
+          fail=0
+          for arch in amd64 arm64; do
+            for name in "fngateway-linux-${arch}" "agent2api-server-linux-${arch}"; do
+              bin=".local-build/bin/${name}"
+              if [ ! -f "$bin" ]; then
+                echo "ERROR: 缺少 ${bin}"; fail=1; continue
+              fi
+              head4=$(head -c4 "$bin" | od -An -tx1 | tr -d ' \n')
+              if [ "$head4" != "7f454c46" ]; then
+                echo "ERROR: ${name} 不是 ELF (magic=${head4})"; fail=1; continue
+              fi
+              got=$(readelf -h "$bin" | awk -F: '/Machine/{print $2}' | sed 's/^ *//')
+              want=$(expect_machine "$arch")
+              if [ "$got" != "$want" ]; then
+                echo "ERROR: ${name} 架构不符: 期望 '${want}', 实际 '${got}'"; fail=1
+              fi
+
+              worst=$(objdump -T "$bin" 2>/dev/null \
+                        | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1 || true)
+              size=$(stat -c%s "$bin")
+              if [ -z "$worst" ]; then
+                echo "  ${name}: ${size} B  ${arch}  (无动态 glibc 依赖)"
+                continue
+              fi
+              if [ "$(printf '%s\n%s\n' "GLIBC_${MAX_GLIBC}" "$worst" | sort -V | tail -1)" != "GLIBC_${MAX_GLIBC}" ]; then
+                echo "ERROR: ${name} 要求 ${worst} > 允许的 GLIBC_${MAX_GLIBC}"
+                echo "       飞牛 fnOS 上会报 \"version \`${worst#GLIBC_}' not found\"。"
+                echo "       请把本 job 的 runner 换回更低 glibc 的镜像（见文件头注释）。"
+                fail=1
+              else
+                echo "  ${name}: ${size} B  ${arch}  最高要求 ${worst} <= GLIBC_${MAX_GLIBC} OK"
+              fi
+            done
+          done
+          exit $fail
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-binaries
+          path: .local-build/bin/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── 打包 .fpk 并发布 ─────────────────────────────────────────
+  package:
+    name: Package fpk
+    needs: binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read version from manifest
+        run: |
+          APP_VERSION=$(grep '^version[[:space:]]*=' manifest | sed 's/^version[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]')
+          if [ -z "$APP_VERSION" ]; then
+            echo "ERROR: Failed to read version from manifest"
+            exit 1
+          fi
+          echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+          echo "APP_VERSION=${APP_VERSION}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download binaries
+        uses: actions/download-artifact@v6
+        with:
+          name: linux-binaries
+          path: .local-build/bin
+
+      - name: Download fnpack
+        run: |
+          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64"
+          mkdir -p .local-build/tools
+          wget -q "$FNPACK_URL" -O .local-build/tools/fnpack
+          if [ ! -s .local-build/tools/fnpack ]; then
+            echo "ERROR: fnpack download failed or file is empty"
+            exit 1
+          fi
+          chmod +x .local-build/tools/fnpack
+          echo "fnpack downloaded ($(stat -c%s .local-build/tools/fnpack) bytes)"
+
+      # 拉上游 tag 源码 → 把 desktop-tauri/ui 同步进 app/ui → 跑全部预检。
+      # 这一步同时是**上游漂移探针**：仓库里提交的面板副本若与上游 tag 不一致，
+      # verify_webui_provenance() 会按钉住的树哈希失败，逼我们人工确认
+      # 「面板形态是否还是 fngateway 能改写的那一种」。
+      - name: Sync upstream UI + preflight checks
+        run: python3 build.py --sync-upstream
+
+      # 与本地构建走的是同一条打包路径（build.py），CI 只负责把二进制喂进
+      # .local-build/bin —— 本地与 CI 不会出现「两边包不一样」。
+      - name: Build fpk packages
+        run: python3 build.py
+
+      - name: Verify packages exist
+        run: |
+          ls -lh ./*.fpk
+          count=$(ls -1 ./*.fpk 2>/dev/null | wc -l)
+          if [ "$count" -ne 2 ]; then
+            echo "ERROR: 期望产出 2 个 fpk（amd64 + arm64），实际 ${count} 个"
+            exit 1
+          fi
+
+      - name: Calculate checksums
+        run: |
+          sha256sum ./*.fpk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "PACKAGE_SHA256=$(sha256sum "agent2api-${APP_VERSION}-amd64.fpk" | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Upload fpk artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent2api-fpk
+          path: |
+            *.fpk
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## Build Summary
+
+          **Version:** ${APP_VERSION}
+
+          **Git Info:**
+          - Commit: \`${{ github.sha }}\`
+          - Branch: \`${{ github.ref_name }}\`
+          - Triggered by: ${{ github.event_name }}
+
+          **Artifacts:**
+          $(sed 's/^/- \`/; s/$/\`/' SHA256SUMS.txt)
+          EOF
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${{ github.ref_name }}"
+          CHANGELOG=$(grep '^changelog[[:space:]]*=' manifest | sed 's/^changelog[[:space:]]*=[[:space:]]*//' | sed 's/<br>/\n/g')
+          NOTES="${CHANGELOG}\n\n---\n**SHA256 (amd64):** \`${PACKAGE_SHA256}\`"
+
+          # 重打同一个版本标签时是替换而不是失败：若同名 Release 已存在则先删除
+          # （保留 tag 本身），否则 gh 会报 "release already exists" 导致
+          # 「包已构建成功但发布失败」，留下 tag 与 Release 不一致的状态。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — deleting it before recreating"
+            gh release delete "$TAG" --yes
+          fi
+
+          gh release create "$TAG" \
+            ./*.fpk \
+            SHA256SUMS.txt \
+            --title "$TAG" \
+            --notes "$(echo -e "$NOTES")"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,8 @@
+# 生命周期脚本与配置必须在 Linux 上以 LF 运行：
+# CRLF 会让 cmd/* 的 shebang 与命令解析失效（fnOS 侧表现为安装/启动失败）。
+* text=auto eol=lf
+
+# 图标与二进制资源不参与换行转换。
+*.png binary
+*.PNG binary
+*.fpk binary

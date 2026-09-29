@@ -1,0 +1,5 @@
+#!/bin/bash
+# cmd/config_init - 应用配置前置。
+
+echo "正在准备应用配置更新..."
+exit 0

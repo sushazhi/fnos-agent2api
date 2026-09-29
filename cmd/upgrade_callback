@@ -1,0 +1,22 @@
+#!/bin/bash
+# cmd/upgrade_callback - 升级后置：补齐目录、清理残留，绝不触碰用户数据。
+#
+# 用户数据（含 ${TRIM_PKGVAR}/data/agent2api.db 内的账号凭据与 API 密钥，
+# 以及 ${TRIM_PKGVAR}/apikey 内的网关密钥）一律原样保留；
+# 升级只需要保证目录完整与 socket 清理。
+
+set -u
+
+echo "正在完成 Agent2API 网关升级..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+
+mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/home" 2>/dev/null
+chmod 700 "${DATA_DIR}/data" 2>/dev/null
+chmod 700 "${DATA_DIR}/home" 2>/dev/null
+
+# 清理升级前的 socket 残留，避免启动时 bind 失败。
+rm -f "${TRIM_APPDEST}/agent2api.sock" 2>/dev/null
+
+echo "升级完成，账号与密钥均已保留"
+exit 0

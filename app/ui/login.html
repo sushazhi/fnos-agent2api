@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent2API · 登录</title>
+  <!-- 组件库产物（ui-kit + Tailwind，由 ui-islands 构建）：与主面板同一份。
+       页面外壳的取值也改走它的 --ui-* 令牌，不再自己硬编码一套深色变量。 -->
+  <link rel="stylesheet" href="islands/ui.css">
+  <style>
+    /* 样式表里只留 html/body 与第三方 widget 的样式：卡片、品牌区、表单都由 React 岛
+       （ui-islands/src/islands/login-page.tsx）用组件库的工具类渲染。 */
+    body {
+      /* margin: 0 与 box-sizing 是原先那条 `* { margin:0; padding:0; box-sizing:border-box }`
+         全局重置的遗留：组件库的产物刻意不含 preflight（见 index.html 里 ui.css 那条注释），
+         全局重置已随本次改写删掉，缺了这两条 body 会吃浏览器默认的 8px 外边距 ——
+         页面立刻多出 16px 纵向溢出，右侧冒出一条滚动条。 */
+      margin: 0;
+      box-sizing: border-box;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      font: 14px/1.6 var(--ui-font-sans, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+      color: var(--ui-foreground);
+      /* 顶部主色光晕 + 页面底色：原独立页那层深蓝渐变的等价物，取值改走令牌 */
+      background: radial-gradient(1200px 600px at 50% -10%,
+        color-mix(in srgb, var(--ui-primary) 26%, var(--ui-background)) 0%,
+        var(--ui-background) 55%);
+    }
+    /* 挂载点自身不生成盒子：卡片直接作为 body 的 flex 子项参与居中（与主面板的 .island
+       同一手法）—— 中间多一层 div 的话，卡片的 min(400px,100%) 会按那一层的收缩宽度
+       计算，窄窗口下就偏了 */
+    #login-app { display: contents; }
+    /* 第三方 widget 的内部 DOM 沿用旧页那条 `* { box-sizing; margin: 0; padding: 0 }`
+       重置：全局那条已随本次改写删掉（组件库的工具类是分层 + !important 的，未分层的
+       全局重置将来会和它打架），这里按 widget 子树重新圈定范围，观感与迁移前逐字一致。
+       必须排在下面 altcha-widget 那条之前：两条特异性相同，靠顺序定胜负。 */
+    altcha-widget, altcha-widget * { box-sizing: border-box; margin: 0; padding: 0; }
+    /* 官方 widget 微调：
+       ① 行铺满表单宽度（官方默认按内容收窄，在表单里会显得靠左）；
+       ② label 钉住度量：这条原本是为了盖过登录页那条全局 label 规则（margin
+          14px 0 5px 与灰色会把「我不是机器人」压下去、变灰），全局规则已随本次
+          改写删掉，保留本行只为让这一块的观感与迁移前逐字一致；
+       ③ 隐藏品牌 footer（altcha.org 外链，与 OmniProxy 的取用方式一致）。 */
+    /* 组件只在开启校验时占位：校验关闭后它被隐藏，margin 会随 display:none
+       一起消失，与按钮之间的间距改由 #submit 自己的 margin-top 撑住
+       （两侧各 20px，开关前后视觉一致） */
+    altcha-widget { display: block; margin: 20px 0 0; }
+    #submit { margin-top: 20px; }
+    altcha-widget .altcha { width: fit-content; max-width: 100%; margin: 0 auto; box-sizing: border-box; }
+    altcha-widget .altcha-label label { margin: 0; font-size: 13px; color: inherit; }
+    altcha-widget div:has(> .altcha-logo) { display: none; }
+  </style>
+</head>
+<body>
+  <!-- 整页界面由 React 岛渲染（ui-islands/src/islands/login-page.tsx，随 islands/ui.js
+       一起加载；岛直接渲染卡片本身，不在这里写静态骨架）。
+       这个 <script> 必须排在 #login-app 之后、且不能加 defer/async：下面那段登录脚本
+       要同步拿到岛渲染出来的 #username / #password / #submit / #error / #mode-tip。 -->
+  <div id="login-app"></div>
+  <script src="islands/ui.js"></script>
+
+  <script type="module" src="/altcha.min.js"></script>
+  <script>
+    (function () {
+      'use strict';
+      var $ = function (id) { return document.getElementById(id); };
+      var tip = $('mode-tip');
+      var errorEl = $('error');
+      var button = $('submit');
+      var isSetup = false;
+
+      // 已登录（access 会话有效）→ 直接进面板；401 → 留在本页
+      fetch('/api/session').then(function (resp) {
+        if (resp.ok) window.location.href = '/';
+      }).catch(function () { /* 未登录，留在本页 */ });
+
+      // ── ALTCHA 官方 widget（proof-of-work，协议见 server::altcha）──
+      // 点一下「我不是机器人」→ widget 领题并在后台算 → 绿勾「验证成功」，
+      // verified 事件给出随提交的 payload。payload 一次性（服务器用后即焚）：
+      // 提交失败要 widget.reset() 重新验证。网关关闭了校验时领题回 400，
+      // 整个 widget 隐藏，提交不带 payload。
+      var captchaPayload = null;
+      var captchaRequired = true; // 探测完成前先按「需要验证」保守处理
+      var widget = document.getElementById('altcha');
+
+      widget.addEventListener('verified', function (event) {
+        captchaPayload = (event.detail && event.detail.payload) || null;
+      });
+      widget.addEventListener('expired', function () {
+        captchaPayload = null;
+      });
+
+      // 探测开关：未启用时领题回 400，隐藏验证行（提交自然不带 payload）
+      fetch('/api/panel/captcha').then(function (resp) {
+        if (resp.ok) return;
+        captchaRequired = false;
+        widget.style.display = 'none';
+        // widget 会在表单里留一个 required 的复选框（#altcha_checkbox）。它被
+        // 隐藏后用户勾不到，浏览器却仍拿它做原生校验：校验不过就不派发 submit，
+        // 而隐藏元素连「请勾选」的气泡都弹不出来 —— 表现为点「登录」毫无反应。
+        // 关掉原生校验，改由下面的提交逻辑自己把关（它本来就会检查各项）。
+        $('form').noValidate = true;
+      }).catch(function () { /* 网关不可达：widget 自会显示错误 */ });
+
+      // 决定模式：没有任何管理员 → 注册；否则登录
+      fetch('/api/panel/status').then(function (resp) { return resp.json(); }).then(function (data) {
+        var registered = data && data.data && data.data.registered;
+        isSetup = !registered;
+        tip.textContent = isSetup
+          ? '首次使用：创建一个管理员账号，用于登录此面板'
+          : '请输入管理员账号与密码';
+        $('submit').textContent = isSetup ? '创建账号并进入面板' : '登录';
+        if (isSetup) $('password').placeholder = '设置密码（至少 8 位）';
+      }).catch(function () {
+        tip.textContent = '无法连接网关，请确认服务已启动';
+      });
+
+      function doSubmit(username, password) {
+        button.disabled = true;
+        errorEl.textContent = '';
+        var body = { username: username, password: password };
+        if (captchaPayload) body.captcha = captchaPayload;
+        fetch(isSetup ? '/api/panel/setup' : '/api/panel/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(function (resp) {
+          return resp.json().then(function (payload) { return { ok: resp.ok, payload: payload }; });
+        }).then(function (result) {
+          if (result.ok) {
+            window.location.href = '/';
+            return;
+          }
+          var detail = result.payload && (result.payload.error || result.payload);
+          // 后端的错误信封是 {success:false, error:"账号或密码不正确"}，error
+          // 是字符串；也兼容 {message:"…"} 形态的对象
+          if (detail && typeof detail === 'object') detail = detail.message;
+          errorEl.textContent = detail || '请求失败，请重试';
+          button.disabled = false;
+          captchaPayload = null; // payload 是一次性的：失败后重新验证
+          if (captchaRequired) widget.reset();
+        }).catch(function () {
+          errorEl.textContent = '无法连接网关';
+          button.disabled = false;
+          captchaPayload = null;
+          if (captchaRequired) widget.reset();
+        });
+      }
+
+      // capture：先于官方 widget 的 form 集成逻辑跑，未验证时给出明确提示
+      $('form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var username = $('username').value.trim();
+        var password = $('password').value;
+        if (!username || !password) {
+          errorEl.textContent = '请填写账号与密码';
+          return;
+        }
+        if (captchaRequired && !captchaPayload) {
+          errorEl.textContent = '请先勾选「我不是机器人」完成验证';
+          return;
+        }
+        doSubmit(username, password);
+      }, true);
+    })();
+  </script>
+</body>
+</html>

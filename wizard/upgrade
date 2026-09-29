@@ -1,0 +1,15 @@
+[
+  {
+    "stepTitle": "⬆️ 升级 Agent2API 网关",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "升级会先停止服务，再替换程序文件。<b>账号凭据与 API 密钥全部保留</b>。"
+      },
+      {
+        "type": "tips",
+        "helpText": "网关密钥（<code>apikey</code>）同样保留，无需重新配置下游客户端。"
+      }
+    ]
+  }
+]

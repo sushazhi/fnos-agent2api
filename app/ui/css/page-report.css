@@ -1,0 +1,586 @@
+/* ─────────────────────────────────────────────
+   报表页：时间范围 / 统计概览 / 热力图 / 缓存命中率 / 两个趋势图
+   颜色一律取 tokens.css 的语义变量，浅色深色共用同一组声明；
+   热力图五档用 --hm-* 变量集中定义，格子与图例共用，色值只有一处。
+   ───────────────────────────────────────────── */
+
+/* ─── 图表配色 ───
+   折线图有两条线（命中率 + 总 Token），各配一条纵轴，所以颜色是「哪个读数
+   属于哪根轴」的唯一线索：读数字、读标注、读刻度都靠它把三处串起来。
+   两条线的颜色在这里各定义一次，浅色 / 深色 / 跟随系统三处主题共用同一组
+   令牌名，深色下换成在深底上够亮的取值（与 --ok / --warn 那批语义色同一手法）。
+   用量线取琥珀而不是再借一个语义色：warn 在别处表示「需要注意」，
+   而 Token 用量本身没有好坏之分，借它会让这条线的颜色带上原本没有的暗示。 */
+:root {
+  --chart-tokens: oklch(0.72 0.16 65);
+
+  --hm-0: var(--surface-3);
+  --hm-1: color-mix(in srgb, var(--primary) 22%, var(--surface-3));
+  --hm-2: color-mix(in srgb, var(--primary) 45%, var(--surface-3));
+  --hm-3: color-mix(in srgb, var(--primary) 70%, var(--surface-3));
+  --hm-4: var(--primary);
+}
+
+/* ─── 热力图色阶 ───
+   品牌色按透明度分档，而不是写五个色值：
+   浅色主题下品牌蓝叠在近白底上、深色下叠在深灰底上，
+   同一个 color-mix 表达式两套主题自然收敛（深色需要更高不透明度才看得见，
+   所以深色块里单独覆盖一次，这是唯一按主题分写的地方）。
+   两个基色都取令牌：浅色叠 --surface-3（比画布深一档的槽色）、
+   深色叠 --surface-inset（深色下唯一比画布更深的凹槽色），
+   这样「最浅一档」在两套主题里都稳稳低于任何一档着色格。 */
+
+:root[data-theme="dark"] {
+  --hm-1: color-mix(in srgb, var(--primary) 34%, var(--surface-inset));
+  --hm-2: color-mix(in srgb, var(--primary) 56%, var(--surface-inset));
+  --hm-3: color-mix(in srgb, var(--primary) 78%, var(--surface-inset));
+  --hm-4: var(--primary);
+}
+
+/* 深色下的用量线：上面那个琥珀色（0.72 亮度）在深底上够亮，但与深色主题的
+   --warn 几乎同色，两条线并排时容易把用量线误读成告警色。这里换成更浅、
+   更偏橙的一档，与同屏的 --warn 拉开距离。 */
+:root[data-theme="dark"] {
+  --hm-1: color-mix(in srgb, var(--primary) 34%, var(--surface-inset));
+  --hm-2: color-mix(in srgb, var(--primary) 56%, var(--surface-inset));
+  --hm-3: color-mix(in srgb, var(--primary) 78%, var(--surface-inset));
+  --hm-4: var(--primary);
+  --chart-tokens: oklch(0.8 0.15 75);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --hm-1: color-mix(in srgb, var(--primary) 34%, var(--surface-inset));
+    --hm-2: color-mix(in srgb, var(--primary) 56%, var(--surface-inset));
+    --hm-3: color-mix(in srgb, var(--primary) 78%, var(--surface-inset));
+    --hm-4: var(--primary);
+    --chart-tokens: oklch(0.8 0.15 75);
+  }
+}
+
+/* ─── 页头里的时间范围筛选 ───
+   分段控件复用 components.css 的 .seg / .seg-item（不另造一套），
+   .head-actions 自带 margin-left:auto，于是筛选与刷新按钮自动靠右，
+   这里不需要任何额外定位声明。 */
+
+/* 概览小格：数字上等宽，切换范围时 1 → 10 不会让整块左右跳 */
+.page[data-page="overview"] .field .value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Top 模型是标识符（含连字符与版本号），等宽更易比对 */
+.page[data-page="overview"] .field .value.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+/* 缓存窗口的百分比：比普通读数大一号，四个窗口横向一排时更有分量 */
+.page[data-page="overview"] .field.rate .value.big { font-size: 17px; font-weight: 650; }
+
+.page[data-page="overview"] .field .sub {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Top 账号 / Top 提供商：并排两张卡 ───
+   两者回答同一个问题的两个粒度（哪一家在承载 / 哪个登录态在承载），放在一起才便于
+   对照着看，所以各占一半宽度而不是各占一整行 —— 满宽时条要拉出一千多像素，
+   读起来反而比不出差别。
+
+   用 flex 而不是 grid：两张卡**各自独立决定显隐**（后端字段缺失就藏），
+   flex-wrap 下藏掉一张时剩下一张自动铺满整行；grid 的固定两列会留下半行空白。
+   flex-basis 320px 是「低于这个宽度就换行」的阈值，两卡并排的下限因此是
+   ~654px（两张 320 + 间距），比 900px 的窄窗口断点更早换行 —— 换行后每张满宽，
+   也就是窄窗口下退化成改动前的观感。 */
+.report-rank-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+/* min-width:0 是 flex 项的必需声明：不写的话内容（长名字）会把项撑破，
+   flex 的收缩下限默认是内容宽度，两张卡就不再等宽了。
+   container-type 供下面按卡片宽度分档用（名字列的上限），具名 rank 是为了
+   将来这张卡里再嵌别的容器时不会互相认错祖先 —— 与 page-accounts.css 的
+   具名容器 card 同一手法。 */
+.report-rank-grid > .panel {
+  flex: 1 1 320px;
+  min-width: 0;
+  container: rank / inline-size;
+}
+
+/* 上面给 .panel 写了 flex 显示，就压过了浏览器对 hidden 的默认 display:none ——
+   于是「字段缺失就藏起来」会失效（卡片留在原地空着）。显式补回来，
+   两张卡的显隐判断在 JS 里，这里只保证它落得下去。
+   （与 page-accounts-providers.css 里 .add-provider-block[hidden] 同一个坑。） */
+.report-rank-grid > .panel[hidden] { display: none; }
+
+/* ─── 排行行（两张卡共用）───
+   每行「名字 + 条 + Token 用量 + 百分比」四列。用 HTML + 百分比宽度而不是 SVG：
+   这一块没有坐标轴与刻度，条宽只要跟着容器伸缩即可，SVG 反而要多挂一个
+   ResizeObserver 去量宽度重绘（三张图的观察器是给坐标轴用的，这里用不上）。
+
+   列宽：**名字列按内容自适应**，百分比定宽（48px 容得下 100.0%），中间的条吃掉
+   剩余宽度。名字列不给固定值，是因为这一列的长度天生不齐：同屏既有「未知账号」
+   这样的短名，又有完整邮箱（账号名就是登录邮箱，20 个字符起）。固定宽度只有两种
+   下场 —— 按短的给，邮箱被省略号切掉（用户看不出是哪个账号，而这一列的全部意义
+   就是认出账号）；按长的给，短名字那张卡白占一列、条被挤短。所以让它自己量：
+   取本卡最长那条名字的宽度，上限 200px（再长就截断，全名仍在 tooltip 与 title 里）。
+
+   上限之所以必要：名字列宽了，条就窄了。两张卡并排时每张的内宽约 450px，
+   名字列吃掉 200px 后条仍有一百多像素，看得出长短；不设上限则一条超长 UID
+   就能把条挤成 0，那时整块看起来像坏了。条自己也有 56px 下限，与名字列的
+   上限一起把「谁先让位」定死：窗口窄到放不下时先截名字，条不会消失。
+
+   ── 上限分两档，按卡片自己的宽度给（container query）──────
+   上限不该是一个定值，因为同一份样式要伺候两种卡片宽度：两维数据都在时两张卡
+   并排（每张约 450px 内宽），只有一维时剩下一张铺满整行（约 1000px 内宽）。
+   前者给 200px 就得让条剩一百多像素；后者给 200px 则是白白浪费 —— 明明有
+   一千像素，这一列还是把邮箱截掉，而它存在的全部意义就是让人认出账号。
+   所以按卡片宽度分档：窄卡（< 700px）200px，宽卡 420px（账号卡的名字前还有
+   一枚提供商徽章，上限按「徽章 + 名字」的总和给，理由写在容器查询那头）。
+   用 container query 而不是媒体查询：要看的是**卡片**多宽，不是窗口多宽 ——
+   窗口宽时两张卡各占一半，窗口窄时它们换行后各占满宽，同一个窗口宽度下
+   卡片的实际宽度并不固定，只有问卡片自己才问得准。
+
+   ── 为什么用 subgrid ────────────────────────────────────────
+   列宽要在**同一张卡内共享**：四列若各行独立算，每行的名字列都会等于自己那条
+   名字的宽度，条就从不同的 x 起画，一张卡里几条参差的起点看起来像排版坏了。
+   subgrid 让各行复用父容器算出的列轨（父容器按所有行的内容取最大），
+   于是既自适应又对齐。这要求 Chromium 117+，本应用跑在 WebView2（常青版）上。 */
+.rank-shares {
+  display: grid;
+  /* 名字列 minmax(0, max-content)：取本卡最长名字的宽度，放不下时能一路收到 0
+     （不收的话整行会顶出卡片）；条 minmax(56px, 1fr)：保底 56px 再吃剩余空间。
+
+     第三列是 Token 读数，比改造前的请求数要宽：请求数最多四位（含千分位五位），
+     而 Token 读数是「8400万」「1.2亿」或英文档的「1.20M」，再加上万以内的
+     精确千分位（「9,999」五位、极端时「999,999」七位）。56px 在等宽小字下
+     刚够五到六个字符，取 68px 把这个量级放到「不必截断」的宽度上，省掉
+     一个「本来放得下却被省略号切掉」的读数。 */
+  grid-template-columns: minmax(0, max-content) minmax(56px, 1fr) 68px 48px;
+  align-items: center;
+  /* 行少时贴顶排布：容器一旦比内容高（max-height 生效后由父级拉伸等场景），
+     默认的 stretch 会把各行摊开来填高度，行距忽大忽小看起来像排版坏了 */
+  align-content: start;
+  gap: 8px 10px;
+  /* 列表全量渲染后行数随账号 / 提供商数走：限高约 7 行，超出的部分在卡内
+     滚动，两张并排的卡片高度不再随账号数一起长。scrollbar-gutter 常驻预留，
+     账号卡开始滚动时四列轨道不会突然被滚动条压窄（与 page-accounts.css 同一手
+     法），两张卡并排时列的对齐也始终一致。 */
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+
+/* 空态（「还没有账号用量」）占满整行，不被四列轨道切成窄条 */
+.rank-shares > .empty { grid-column: 1 / -1; }
+
+.rank-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  cursor: default;
+}
+
+.rank-row .name {
+  overflow: hidden;
+  max-width: 200px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Top 账号行名字前的提供商徽章：与账号页「提供商」列同一枚（pbadge 的
+   样式住在 page-accounts-table.css，全局加载，这里只做行内适配）——
+   徽章比文字行盒高，基线对齐会显得下沉，改居中；右缘留一道与名字的间距。
+   名字过长被省略号截断时徽章完整保留，截的只是名字本身。 */
+.rank-row .name .pbadge {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* 卡片铺满整行时（另一维没数据、被隐藏）给名字列更宽的上限。
+   查询的是具名容器 rank，也就是卡片本身（见上面 .report-rank-grid > .panel）。
+   420px 的量级：徽章一枚就占 ~140px，账号名多是登录邮箱（20~30 字符 ≈ 230px），
+   300px 时徽章后只剩一百多像素，邮箱还是放不下 —— 上限要按「徽章 + 名字」
+   的总和给，账号名才有展示完整的余地。 */
+@container rank (min-width: 700px) {
+  .rank-row .name { max-width: 420px; }
+}
+
+/* 轨道：定高 + 圆角，与热力图格子同一档观感（都是「一格量化数据」） */
+.rank-row .track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.rank-row .bar {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width .18s ease;
+}
+
+/* 请求数与百分比：都走等宽 + 右对齐，各行竖着比对才齐 */
+.rank-row .num,
+.rank-row .pct {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rank-row .pct { color: var(--text); font-weight: 600; }
+
+/* 卡片被拖到很窄时（两张并排的下限 ~320px，或窗口极小），条保住自己的
+   56px 下限，名字列跟着收到放得下的宽度 —— 列轨是 minmax(0, max-content)，
+   上限只是「不许长过」，放不下时它自己会缩，所以这里不需要额外断点。 */
+
+/* ─── 用量环形图（模型 / 提供商两张并排）───
+   两张卡各占一半宽度，与上面两张排行卡同一取舍：它们回答的是同一个问题的
+   两个维度（用量花在哪个模型 / 落到哪家），并排放才便于对照。
+   用 flex + flex-basis 而不是 grid：两张卡**各自独立决定显隐**（models 是新增
+   字段，旧后端不返回），flex-wrap 下藏掉一张时剩下一张自动铺满整行；
+   grid 的固定两列会留下半行空白。与 .report-rank-grid 同一手法。 */
+.report-donut-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.report-donut-grid > .panel {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+/* 上面给 .panel 写了 flex 显示，就压过了浏览器对 hidden 的默认 display:none ——
+   于是「字段缺失就藏起来」会失效（卡片留在原地空着）。显式补回来。 */
+.report-donut-grid > .panel[hidden] { display: none; }
+
+/* 环 + 右侧图例列表：窄窗口下改成上下排（环在上、列表在下），
+   否则 220px 的环会把列表挤到只剩几十像素、名字全被截断。 */
+.donut-layout {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.donut-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.donut-svg { display: block; }
+
+.donut-slice { transition: opacity .12s ease; }
+
+/* 悬停某一段时其余各段淡出：扇区窄的时候光靠描边看不出选中的是哪一段 */
+.donut-svg:hover .donut-slice { opacity: .45; }
+.donut-svg .donut-slice:hover { opacity: 1; }
+
+/* 扇区内的百分比：白色字 + 深色描边，保证落在任意一段底色上都读得清
+   （浅黄 / 浅绿那些段的对比度单靠白字是不够的）。paint-order 让描边压在字下面，
+   字本身不被描边吃掉笔画。 */
+.donut-label {
+  fill: #fff;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  stroke: oklch(0 0 0 / 55%);
+  stroke-width: 2px;
+  pointer-events: none;
+}
+
+/* 环心读数：绝对定位盖在 SVG 中间（环的中空处）。
+   pointer-events:none 让鼠标穿过它落在扇区上，否则正中间那块会挡住 hover。 */
+.donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+}
+
+.donut-center-value {
+  color: var(--text);
+  font-size: 21px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.donut-center-label {
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+/* 右侧图例列表：一行「色点 + 名字 + Token + 百分比」。
+   名字列吃掉剩余宽度（模型名长短不一，固定宽度要么截断要么白占），
+   两个数值列定宽右对齐，各行竖着比对才齐。 */
+.donut-legend {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  /* 条目多时列表自己滚动，不把卡片撑高 —— 与 Top 排行只显示前 N 名不同，
+     这里全量给出（环形图本来就是看整体构成），所以需要一个上限 */
+  max-height: 232px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.donut-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: var(--r-xs);
+}
+
+.donut-legend-row:hover { background: var(--row-hover); }
+
+.donut-dot {
+  flex: 0 0 9px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.donut-legend-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.donut-legend-tokens,
+.donut-legend-percent {
+  flex: 0 0 auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 百分比比 Token 用量更重要（它是扇区角度本身的读数），给更重的字重 */
+.donut-legend-percent { width: 46px; color: var(--text); font-weight: 600; }
+
+/* 窄窗口：环与列表改成上下排，环自己居中 */
+@media (max-width: 720px) {
+  .donut-layout { flex-direction: column; align-items: stretch; }
+  .donut-wrap { align-self: center; }
+}
+
+/* ─── 热力图 ───
+   53 列（365 天）在格子下限 7px 时约 550px 宽，正常窗口都放得下；
+   overflow-x 只是兜底：窗口被拖到极窄时让方格网横向滚动，
+   而不是把格子压成看不清的细条（所以这里**不**给 SVG 加 max-width:100%，
+   否则会被等比缩小、滚动条永远不出现，等于白设了这道兜底）。 */
+.heat-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
+.report-svg { display: block; }
+
+.hm-cell {
+  fill: var(--hm-0);
+  /* 描边取承载面颜色：格子之间留出细微缝隙，密集时也数得清 */
+  stroke: var(--surface);
+  stroke-width: 1;
+  transition: fill .12s ease;
+}
+
+.hm-cell:hover { stroke: var(--text-3); stroke-width: 1; }
+
+/* 档位只看数值，不带任何其它维度 —— 见 report.js 里 heatmapHtml 的分档注释 */
+.hm-cell.l0 { fill: var(--hm-0); }
+.hm-cell.l1 { fill: var(--hm-1); }
+.hm-cell.l2 { fill: var(--hm-2); }
+.hm-cell.l3 { fill: var(--hm-3); }
+.hm-cell.l4 { fill: var(--hm-4); }
+
+/* 坐标轴文字：日期 / 百分比标签，统一走次要文字色 */
+.hm-axis,
+.chart-axis {
+  fill: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 图例：五档色块 + 每档的请求数范围，与格子共用同一组变量。
+   每项是「色块 + 说明」的一小格，整体是一条会自动换行的横排 ——
+   窄窗口下挤不开就换到下一行，不会把说明文字压成省略号。 */
+.heat-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.heat-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.heat-legend span[class^="l"] {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--hm-0);
+}
+
+.heat-legend span.l1 { background: var(--hm-1); border-color: transparent; }
+.heat-legend span.l2 { background: var(--hm-2); border-color: transparent; }
+.heat-legend span.l3 { background: var(--hm-3); border-color: transparent; }
+.heat-legend span.l4 { background: var(--hm-4); border-color: transparent; }
+
+.heat-scale-label { color: var(--text-3); font-size: 11px; }
+
+/* ─── 图表容器 ───
+   宽度由面板决定，SVG 按量到的像素宽度绘制；容器本身不设最小宽度，
+   免得 ResizeObserver 把「被压缩的宽度」当成真实宽度反复重算。
+   高度下限与两张图各自的 SVG 高度对齐（折线 230 / 柱状 240）：
+   否则数据没回来时容器只有一行「正在加载…」那么高，数据到了整页会往下跳一截。 */
+.chart-wrap { position: relative; width: 100%; min-height: 230px; overflow: hidden; }
+.chart-wrap.tall { min-height: 240px; }
+
+/* 网格线：比边框更淡，只做读数辅助，不与柱子抢视觉 */
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+/* ─── 命中率折线（左轴）───
+   主色画命中率、琥珀色画用量：两条线在同一张图里，颜色是唯一能把它们与
+   各自那侧刻度连起来的线索（左轴=蓝、右轴=琥珀），所以两处的色值必须同源。 */
+.chart-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-line.tokens { stroke: var(--chart-tokens); }
+
+/* 折线上的点：填充取表面色 + 与所属线同色的描边，悬停那一带不被线吃掉。
+   两条线的点各写一条规则（而不是行内 style）：颜色只在 CSS 里定义一次。 */
+.chart-dot { fill: var(--surface); stroke: var(--primary); stroke-width: 2; }
+.chart-dot.tokens { stroke: var(--chart-tokens); }
+
+/* 点上的读数标注：与所属那条线同色，读数字时不必回忆「哪个颜色是哪条线」。
+   字号比坐标轴文字大一档（11 vs 10）—— 它是这张图的主要读数，不是辅助刻度。 */
+.chart-label {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  /* 描边取承载面颜色：标注落在网格线或折线上时，仍能看清字 */
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.chart-label.rate { fill: var(--primary); }
+.chart-label.tokens { fill: var(--chart-tokens); }
+
+/* ─── 折线图图例 ───
+   两条线 + 两条轴，图例回答「哪根线是哪根轴」。色块与线、标注共用
+   --primary / --chart-tokens，色值只有那一处定义。 */
+.chart-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+  font-size: 11.5px;
+}
+
+.chart-legend .swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--primary);
+}
+
+.chart-legend .swatch.tokens { background: var(--chart-tokens); }
+
+/* 「左轴 / 右轴」是补充说明，比线名轻一档，不与线名抢注意力 */
+.chart-legend .axis-hint {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.bar { fill: var(--primary); }
+
+/* 热区层：单独一层 SVG 覆盖在图形之上，指针事件只落在这里。
+   这样柱子 / 折线自身不必承担 hover 语义，零值日也能有读数。
+   也正因为它在最上层，柱子的 hover 反馈要由 .chart-hit:hover 表达（见下），
+   给 .bar 写 :hover 是够不到的 —— 指针永远先被这层接走。 */
+.chart-hit-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.chart-hit {
+  fill: transparent;
+  pointer-events: all;
+  cursor: default;
+}
+
+.chart-hit:hover { fill: color-mix(in srgb, var(--primary) 8%, transparent); }
+
+.chart-empty { fill: var(--text-3); font-size: 12px; }
+
+/* 错误态：与 .empty 同档，但用危险色点明「这些数字现在不可信」 */
+.report-error { color: var(--danger); }
+
+/* 窄窗口（与侧栏收起同断点）：四个缓存窗口退成两列，页头筛选整行铺开 */
+@media (max-width: 900px) {
+  .page[data-page="overview"] .panel-head .head-actions { flex-basis: 100%; margin-left: 0; justify-content: flex-start; }
+}

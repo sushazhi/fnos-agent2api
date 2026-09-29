@@ -1,0 +1,9 @@
+# 构建缓存与产物
+.local-build/
+__pycache__/
+*.pyc
+*.fpk
+SHA256SUMS.txt
+
+# 上游许可全文随仓库提交（build.py 打包时要放进包内），
+# 所以这里**不**忽略 LICENSE.upstream。

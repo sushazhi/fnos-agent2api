@@ -1,0 +1,14 @@
+#!/bin/bash
+# cmd/upgrade_init - 升级前置：停机由平台负责，这里只做校验。
+
+set -u
+
+echo "正在准备升级 Agent2API 网关..."
+
+if [ -z "${TRIM_PKGVAR:-}" ]; then
+    echo "Error: 安装器未提供 TRIM_PKGVAR，环境异常" >&2
+    exit 1
+fi
+
+echo "升级前置检查通过"
+exit 0

@@ -1,0 +1,6 @@
+#!/bin/bash
+# cmd/uninstall_init - 卸载前置：停机由平台负责。
+
+set -u
+echo "正在准备卸载 CLI2API 网关..."
+exit 0

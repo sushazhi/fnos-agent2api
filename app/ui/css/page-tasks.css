@@ -1,0 +1,212 @@
+/* ─────────────────────────────────────────────
+   定时任务页：任务卡片列表（开关 / 间隔 / 立即执行）
+
+   一张卡片 = 一行任务：左侧是名称、说明与运行状态，右侧是间隔输入与动作按钮。
+   卡片用 flex 两端对齐而不是 grid 定列宽：说明文字的长度差别很大
+   （「请求日志自动刷新」一行就说完，凭证维护要两句），定列宽会让长的那条
+   把短的挤成一条窄柱；两端对齐则自然按内容分配。
+
+   颜色一律取 tokens.css 的语义变量，浅色深色共用同一组声明。
+
+   滚动：页面外框锁高（见 layout.css 的 `[data-page="tasks"]` 那组声明），
+   滚动发生在本文件声明的 .task-list 上 —— 与日志页把滚动交给 .log-list 同款，
+   面板头与页脚条因此常驻，不会跟着任务条数一起滚出视野。
+   ───────────────────────────────────────────── */
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 列表吃掉面板头与页脚条之间的剩余高度，滚动只发生在这里 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 卡片是「整体重建」式重绘（结构变化时 task-list.innerHTML 一次替换），
+     与账号表 / 日志列表同理：滚动锚定会算到被移除的节点上，补偿出一个莫名的
+     滚动位移。这里统一禁用，重绘不改变视口、滚动位置严格保持。 */
+  overflow-anchor: none;
+}
+
+/* 空态（加载中 / 无任务 / 后端不可用）在列表里居中：
+   列表成了 flex 列容器 + 滚动区，只有这一条内容时它会被顶在左上角
+   （与日志页 `.log-list > .log-empty:only-child` 同一处理）。 */
+.task-list > .log-empty:only-child { margin: auto; }
+
+.task-item {
+  flex: none;   /* 列表是 flex 列容器 + 滚动区：卡片不许被压缩，超出的一律交给列表滚动 */
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+
+/* ── 后六条的两栏网格 ─────────────────────────────────────
+   前两条（自动签到 / 凭证自动维护）整行铺开，其余六条收进这里分两栏、每栏三条。
+
+   **列优先**（`grid-auto-flow: column` + 三行）：顺序仍是从上到下的阅读顺序，
+   而三行两列的排法恰好把两类任务分开 —— 左栏是后端任务（定时查询积分 /
+   模型目录刷新 / 软件版本检查，都带「立即执行」），右栏是页面任务（三个页面
+   自动刷新，执行者是页面自己的定时器）。行优先会让两类在每行里交错，
+   那就看不出这条分栏想表达什么了。见 tasks-panel.js 的 `cardsHtml`。
+
+   行高 `auto` + 卡片被拉伸（grid 默认 stretch）让同一行的两栏等高，
+   卡片高度参差时也还是齐的（列内动作区随 `.task-main` 的 `flex: 1` 落到卡片
+   底部，同一行的「每 N 分钟」因此横向对齐）。
+
+   条数将来若超过六条（后端加了新任务），会照三行一栏的规则多排出一栏，
+   顺序与对齐都仍然成立 —— 不是「六条硬编码」，三行只是这里的取整方式。
+   `grid-auto-columns` 是给那种情况兜底：没它的话第三栏按 `auto` 定宽，
+   内容一长就撑破卡片。 */
+.task-grid {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+/* 栏内卡片改纵向：半栏宽度放不下「标题 + 状态」与「间隔 + 立即执行」并排
+   （整行时那条横向布局见 .task-item 的基础规则），动作区因此折到下一行。
+   与页面在 900px 窄窗口下的整体处理同一形态。 */
+.task-grid .task-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+}
+
+/* 窄窗口回落单栏：两栏各自的宽度不够时，并排会把标题行与状态行挤成两条窄柱
+   （中文在窄柱里换行几乎无法阅读，与下面 900px 那条同一理由）。
+   此时改回行优先的单列，卡片保持上面的纵向形态。
+   断点取 1120px：与 components.css 的工具条折行同档，本页在 1120 以下
+   两栏各剩不到 400px，正好是这批卡片开始显得挤的地方。 */
+@media (max-width: 1120px) {
+  .task-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+}
+
+/* 说明区吃掉剩余宽度（动作区定宽，见下） */
+.task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;   /* 允许收缩：否则长说明会把动作区顶出卡片 */
+  flex: 1 1 auto;
+}
+
+.task-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+/* 标题里的开关：名字跟在 track 后面，与设置页的开关行列一致 */
+.task-title .switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.task-name { color: var(--text); }
+
+/* 状态徽标（已开启 / 已关闭 / 执行中…）不参与伸缩，紧跟标题右侧 */
+.task-badge { flex: 0 0 auto; }
+
+/* 标题里的问号（任务说明）：与设置页各面板标题的 .tip-q 是同一个组件。
+   紧跟任务名之后、状态徽标之前 —— 说明是标题的附属，排在徽标前面才不会
+   把「已开启 / 已关闭」推到离标题很远的地方。
+   负左边距让问号贴紧名字：标题行的 gap 是给「开关 ↔ 徽标」用的间距，
+   问号作为名字的注脚，比那档间距更近才读得顺。 */
+.task-title .tip-q { margin-left: -4px; }
+
+/* 运行状态一行（上次 / 下次执行）：等宽数字，扫一眼就能对齐比较 */
+.task-state {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 签到提供商勾选行：与 .role-picks / .provider-pick 同一套「lead + check」观感，
+   但不套边框底色 —— 它是任务卡内部的一行控件，再做内嵌块会跟状态行挤成一团 */
+.task-providers {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 15px;
+}
+
+.task-providers .lead { color: var(--text-3); font-size: 11.5px; }
+
+/* 右侧动作区：间隔输入 + 立即执行，纵向居中于卡片
+   （align-items 用 center 而不是 flex-start：卡片高时按钮贴着顶端会显得散） */
+.task-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.task-interval {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 间隔输入框：收窄到 74px（间隔最多四位数）、等宽字形、数字居中。
+   max-width 必须显式写：components.css 给 input[type=number] 设了 130px，
+   这里要覆盖它。
+
+   ── 为什么可以居中（原先写的是「左对齐」，理由是箭头会推着数字走）──
+   那个理由只对**右对齐**成立：步进箭头在 Chromium 里是 hover / focus 时才
+   占位的，右对齐时数字紧贴右缘，箭头一出现就把数字整体往左推。
+   居中不受影响 —— 箭头占的是右侧的固定宽度，而居中基准是内容盒的中心，
+   数字两侧的空白一起收窄，**数字的墨迹位置不动**。实测确认：悬停让箭头
+   出现的那一下，框左半区（数字所在处）零像素变化，变化全在右半区（箭头本身）。
+   号码是这一格唯一的内容，居中后一眼能读出数值，也不再和右侧单位挤在一起。 */
+.task-interval input[type="number"] {
+  flex: 0 0 auto;
+  width: 74px;
+  max-width: 74px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* 时刻输入（自动签到那条）：time 控件窄一点更好看，与数字框同宽 */
+.task-interval input[type="time"] {
+  flex: 0 0 auto;
+  width: 96px;
+  max-width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-interval-unit { color: var(--text-3); }
+
+/* 窄窗口：动作区折到说明下方整行铺开。
+   不折的话「每天 00:01 + 立即签到」这一组会把说明压成一条窄柱，
+   中文在窄柱里换行几乎无法阅读（与日志页筛选行同一处理思路）。 */
+@media (max-width: 900px) {
+  .task-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .task-actions {
+    justify-content: flex-start;
+  }
+}

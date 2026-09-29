@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent2API · 多提供商本地网关</title>
+  <script>
+    // 与主题持久化配合：在 CSS 解析前先贴上 data-theme，避免深色模式首屏闪烁
+    (() => {
+      const mode = localStorage.getItem('workbuddy-desktop-theme') || 'system';
+      document.documentElement.dataset.theme = mode;
+      const dark = mode === 'dark'
+        || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      // 界面缩放（设置页「显示」）也在这里抢先交一次：缩放是 WebView 层的效果，
+      // 不存在「先贴个属性」这种同步办法，只能尽早发命令 —— 晚了首屏会看到缩放跳一下。
+      // 这只是**尽力而为**的反闪烁：桥（workbuddyDesktop）此时已由壳注入（初始化脚本
+      // 先于页面脚本执行），但命令异步生效且失败不重试；权威的一次在 app.js 的启动
+      // 路径上（applyZoom(storedZoom())）—— 同一份 localStorage，重复应用无副作用。
+      const zoom = Number(localStorage.getItem('workbuddy-desktop-zoom'));
+      if (Number.isFinite(zoom) && zoom >= 80 && zoom <= 130) {
+        try { window.workbuddyDesktop?.setZoom?.(zoom / 100); } catch { /* 浏览器直开忽略 */ }
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/page-accounts.css">
+  <link rel="stylesheet" href="css/page-accounts-providers.css">
+  <!-- 账号页表格化（四家混排的一张表）：排在两个账号页样式之后 ——
+       它要覆盖 page-accounts.css 里 .acct-scroll 的滚动方向等既有声明 -->
+  <link rel="stylesheet" href="css/page-accounts-table.css">
+  <link rel="stylesheet" href="css/page-gateway.css">
+  <link rel="stylesheet" href="css/page-logs.css">
+  <link rel="stylesheet" href="css/page-tasks.css">
+  <link rel="stylesheet" href="css/page-requests.css">
+  <link rel="stylesheet" href="css/page-settings.css">
+  <!-- 更新日志（Markdown 正文 / 版本卡片 / 导航更新提示）：排在页面样式之后，
+       需要时可覆盖 page-settings.css 里为旧的纯文本说明写的规则 -->
+  <link rel="stylesheet" href="css/update-notes.css">
+  <link rel="stylesheet" href="css/page-report.css">
+  <!-- 小问号提示外观（tooltip.js 增强出来的气泡）：排在页面样式之后，
+       需要时可覆盖各页面自己写的尺寸约束 -->
+  <link rel="stylesheet" href="css/tooltip.css">
+  <!-- 表格列设置：必须排在所有页面样式之后 ——
+       列对齐是**用户配置**，要盖过各表为「这一列靠哪边」写死的默认值
+       （.models-table th.r / .acct-table td.cell-pick / .req-head .req-dur …），
+       靠级联顺序取胜而不是堆特异性。与 tooltip.css 同一编排。
+       （select.css 已随 select.js 一并删除：全站最后一个原生 <select> 换成组件库的
+       Select 之后，.select-shell 那一族样式再无任何引用。） -->
+  <link rel="stylesheet" href="css/table-col-settings.css">
+  <!-- 组件库产物（desktop-tauri/ui-kit/，由 ui-islands 构建时一并编译成 ui/islands/ui.css）：
+       Tailwind 的 theme + utilities 两层，刻意不含 preflight —— 基础重置仍由 tokens.css
+       承担，否则 h1-h6 字号、列表缩进、img 显示方式会被整体重置。
+       排在最后：工具类带 !important（原因见 ui-kit/styles/globals.css 顶部），
+       顺序其实已不影响结果，但保持「后加载的是更新的体系」这条阅读线索。 -->
+  <link rel="stylesheet" href="islands/ui.css">
+</head>
+<body>
+  <div class="shell">
+    <!-- ─── 左侧导航 ─── -->
+    <aside class="sidebar">
+      <div class="brand">
+        <!-- 品牌标由 icons.js 注入（与应用图标 icon.png 同一造型，见 icons.js 的 brand 项） -->
+        <div class="brand-logo"></div>
+        <div class="brand-text">
+          <h1>Agent2API</h1>
+        </div>
+      </div>
+
+      <!-- 图标由 icons.js + app.js 注入（内联 SVG，见 icons.js 顶部说明） -->
+      <nav class="nav" id="nav">
+        <div class="nav-group-label">运行状态</div>
+        <button class="nav-item active" data-page="overview" data-icon="overview"><span class="ico"></span><span class="label">报表</span></button>
+        <button class="nav-item" data-page="accounts" data-icon="accounts"><span class="ico"></span><span class="label">账号</span></button>
+
+        <div class="nav-group-label">转发能力</div>
+        <button class="nav-item" data-page="gateway" data-icon="gateway"><span class="ico"></span><span class="label">模型管理</span></button>
+        <!-- 网络代理：出网出口的管理页（代理池 CRUD + 连通性测试 + Clash 出口引用）。
+             挨着「模型管理」是因为它管的是同一个问题的另一半：模型管理决定
+             「请求发往哪家上游」，这里决定「从哪条线路出去」。账号弹窗里的
+             「出网代理」仍可用，但推荐在这里配好、账号按名字引用 ——
+             改一次地址，所有引用的账号一起生效。 -->
+        <button class="nav-item" data-page="proxies" data-icon="proxies"><span class="ico"></span><span class="label">网络代理</span></button>
+        <button class="nav-item" data-page="keys" data-icon="key"><span class="ico"></span><span class="label">网关 Key</span></button>
+        <!-- 文档：接口地址（Base URL / 三种对话协议 / 模型列表）与将来的使用说明。
+             它原先在「网关 Key」页里，R8 按需求搬成独立一级菜单 —— 接口地址是
+             「接客户端」这件事本身要查的东西，与「管理 Key」不是同一类操作，
+             混在一页里用户要在两件事之间来回滚。图标用 logs（文档 + 文本行），
+             语义上就是「文档」，不新画 SVG（见 icons.js）。 -->
+        <button class="nav-item" data-page="docs" data-icon="logs"><span class="ico"></span><span class="label">文档</span></button>
+
+        <div class="nav-group-label">诊断</div>
+        <button class="nav-item" data-page="requests" data-icon="requests"><span class="ico"></span><span class="label">请求日志</span><span class="count" id="nav-count-requests" style="display:none">0</span></button>
+        <button class="nav-item" data-page="logs" data-icon="logs"><span class="ico"></span><span class="label">日志</span><span class="count" id="nav-count-logs" style="display:none">0</span></button>
+        <button class="nav-item" data-page="tasks" data-icon="tasks"><span class="ico"></span><span class="label">定时任务</span></button>
+        <button class="nav-item" data-page="settings" data-icon="settings"><span class="ico"></span><span class="label">设置</span><span class="count" id="nav-count-update" style="display:none">新</span></button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <!-- 网关状态：常驻显示，不必切到「网关」页也能确认服务是否在监听。
+             只说**网关进程**这一件事（进程在不在监听，判据来自壳侧，
+             不依赖 HTTP 能否应答）。曾经还有第二条「可用账号」，与它拆成
+             两个独立事实；账号那行已按需求移除 —— 有没有账号、几个可用，
+             账号页的筛选器与状态列本来就是权威出处。 -->
+        <div class="sidebar-status" id="sidebar-status" title="本地网关监听状态">
+          <!-- 状态行与两个出口由 React 岛渲染（ui-islands/src/islands/port-panel.tsx）：
+               岛直接挂在这个 div 上（.sidebar-status 的子元素是 flex 布局，中间插一层
+               宿主会破坏排版），所以这里不再有静态子节点，class / id / title 保留。
+               对外仍是 window.wbPortPanel = { render, sync, portLabel, isReady }。 -->
+        </div>
+        <div class="theme-switch" id="theme-switch">
+          <button data-mode="system">跟随系统</button>
+          <button data-mode="light">浅色</button>
+          <button data-mode="dark">深色</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ─── 主区域 ─── -->
+    <main class="main">
+      <header class="topbar">
+        <div class="crumb">
+          <span>Agent2API</span>
+          <span class="sep">/</span>
+          <span class="cur" id="crumb-page">报表</span>
+        </div>
+        <div class="spacer"></div>
+        <div class="topbar-actions" id="topbar-status"></div>
+      </header>
+
+      <div class="content">
+        <div class="content-inner">
+
+        <!-- ─── 报表（内部标识仍是 overview，见 app.js 的 PAGES）───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/report-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div。
+             图表全部手写 SVG、不依赖任何图形库，用 ResizeObserver 重绘（改窗口 / 切列数
+             都能自适应）。对外仍是 window.wbReport = { load, render, lastSummary,
+             applyAutoRefresh }。 -->
+        <section class="page active" data-page="overview"></section>
+
+        <!-- ─── 账号 ───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/accounts-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div。
+             这一页是四家账号混排的一张表：优先级在后端是**全局唯一**的一条队列，
+             按优先级升序排行、转发时逐个尝试（见 priority.rs / rotate.rs 的模块头）。
+             对外仍是 window.wbAccountsView / wbAccountsModel / wbAccountPanel 等接口。
+             表骨架（colgroup + thead 的 th[data-col]）由岛渲染，顺序与原先写死的完全一致，
+             列显隐 / 顺序仍由 wbColSettings.syncStaticHead 就地重排。 -->
+        <section class="page" data-page="accounts"></section>
+
+        <!-- ─── 模型管理（内部标识仍是 gateway：localStorage 记忆与 CSS 选择器都依赖它）───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/models-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div ——
+             页面 CSS 用 .page 的直接子选择器（.panel 是它的直接子元素），中间插一层
+             会破坏 .panel 的布局。对外仍是 window.wbModelsPanel 与 window.wbModelsCustom。
+             这一页的**页面骨架类名照旧**（.panel / .panel-head / .mm / .prov-rail /
+             .models-table-wrap / .models-table / .panel-foot …），换掉的只是里面的控件。
+             表骨架（colgroup + thead 的 th[data-col]）也由岛渲染，但顺序与这里原先
+             写死的完全一致，列显隐 / 顺序仍由 wbColSettings.syncStaticHead 就地重排。 -->
+        <section class="page" data-page="gateway"></section>
+
+        <!-- ─── 网络代理 ───
+             出口（代理池）的配置中心：新增 / 编辑 / 删除 / 启停 / 测试连通性，
+             外加「同步 Clash Verge」—— 把 Clash 当前的出口集合整体镜像进来
+             （名称 / 端口 / 启用跟随 Clash，因此那类条目只读；进本页时也会
+             自动同步一次）。账号弹窗的「出网代理」可选「已保存的代理」，
+             引用的就是这里的条目。整页由 React 岛渲染
+             （ui-islands/src/islands/proxies-page.tsx，随 islands/ui.js 一起加载），
+             岛直接挂在这个 section 上、不套宿主 div —— 页面骨架类名照旧
+             （.panel / .panel-head / .models-table-wrap / .models-table / .panel-foot）。
+             对外契约只有 window.wbProxiesPanel = { load }（app.js 切页时调）。 -->
+        <section class="page" data-page="proxies"></section>
+
+        <!-- ─── 网关 Key ───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/keys-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div ——
+             页面 CSS 用 .page 的直接子选择器（.panel 是它的直接子元素），中间插一层
+             会破坏 .panel 的布局。对外仍是 window.wbKeysPanel = { load, render,
+             visibleColumns }。
+             表骨架（table.models-table.keys-table 与 th/col[data-col]）由岛渲染，
+             顺序与原先写死的完全一致，列显隐 / 顺序仍由 wbColSettings.syncStaticHead
+             就地重排。 -->
+        <section class="page" data-page="keys"></section>
+
+        <!-- ─── 文档 ───
+             整页由 React 岛渲染（ui-islands/src/islands/docs-page.tsx）。
+             对外契约一字未改：五个 api-* 元素 id 仍由 port-panel.js 的
+             paintGatewayAddress 就地写文本，五颗复制按钮仍带 .copy-btn 与
+             data-copy-from，clipboard.js 的全局委托照旧命中 —— 两边的脚本
+             都不用改一行。这个空 section 是岛的挂载点，不要删（岛会先
+             replaceChildren 再渲染，所以留着标签即可）。 -->
+        <section class="page" data-page="docs"></section>
+
+        <!-- ─── 日志 ───
+             只承载**不随请求量增长的**系统事件：网关的模型请求（含每一次转发
+             的过程事实：换号、退避重试、上游报错、敏感词命中、代理回退）已
+             全部拆到独立的「请求日志」页 —— 那边一行请求 + 一次悬停就能看全，
+             配合「详情」列的调试报文还能看到完整的上游原始报文。
+             （两边数据源、筛选维度、分页口径都不同，页内 .seg 切换的形态随拆分取消）。
+             原先页头的「自动刷新」开关已迁到「定时任务」页：它改的是本页轮询的
+             间隔，与那几个后台任务同属「定时」这一类，收在一处才好对照调整。 -->
+        <section class="page" data-page="logs">
+          <!-- 整页由 React 岛渲染（ui-islands/src/islands/logs-panel.tsx，随 islands/ui.js
+               一起加载）。岛直接挂在这个 section 上、不套宿主 div —— 页面 CSS 用 .page 的
+               直接子选择器（.panel 是它的直接子元素），中间插一层会破坏 .panel 的布局。
+               对外仍是 window.wbLogsPanel = { load, render, lastStats, applyAutoRefresh,
+               showCategory }。
+               这一页的**页面骨架类名照旧**（.panel / .log-filters / .log-list / .log-pager …），
+               换掉的只是里面的控件：button → Button、.badge → Badge、原生 select → Select 一族、
+               搜索框 → InputGroup、时间档位 → SegmentedControl（旧实现在下面的 #logs-range
+               挂载点上调 wbSegmented.mount，那个挂载点随本次迁移一起消失）。 -->
+        </section>
+
+        <!-- ─── 定时任务 ───
+             到点自动干活的任务集中在这里：自动签到（每天定点）+ 七条等间隔任务
+             （凭证自动维护 / 定时查询积分 / 模型目录刷新 / 软件版本检查 /
+             日志页自动刷新 / 请求日志自动刷新 / 报表自动刷新）。
+             两类走不同的接口（签到是「每天某时刻」，间隔型是「每 N 分钟 / 秒」），
+             但同属「定时」这一类，收在一页才好对照着调。
+             整个列表由 tasks-panel.js 渲染，这里只留容器。
+             排布（见 tasks-panel.js 的 cardsHtml 与 page-tasks.css 的 .task-grid）：
+             自动签到与凭证自动维护整行铺开，其余六条分两栏各三条 —— 左栏是后端
+             任务（带「立即执行」），右栏是页面自动刷新（执行者是页面自己）。 -->
+        <section class="page" data-page="tasks">
+          <!-- 整页由 React 岛渲染（ui-islands/src/islands/tasks-panel.tsx，随
+               islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div ——
+               页面 CSS 用 .page 的直接子选择器（.panel 是它的直接子元素），中间插一层
+               会破坏 .panel 的布局。对外仍是 window.wbTasksPanel.load()。
+               这一页的**页面骨架类名照旧**（.panel / .panel-head / .task-grid …），
+               换掉的只是里面的控件（button → Button、.badge → Badge、开关 → Switch…）。 -->
+        </section>
+
+        <!-- ─── 请求日志 ───
+             网关每次转发到上游的请求日志（后端按保留期存盘，默认 30 天，见 /api/retention）。
+             列形态参考 OmniProxy 的请求日志：时间 / 提供商·账号 / 重试 / 状态 / 模型 /
+             用时 / 用量 / 错误 / 详情。后端 /api/stats/requests 只支持时间区间、状态与
+             模型名精确匹配，分页是 offset 真分页，条数没有前端上限。
+             「重试」一列同时承载重试链与敏感词命中两枚标签（各自带悬停面板，
+             敏感词那枚只写一个「敏」字，理由见 requests-page.tsx 的 retryCell）。
+             这一页是**逐请求事实的唯一去处**：换号链、每轮内部的退避重试（含原因
+             与等待时长）、上游报错原文、代理回退提示、敏感词命中词表都在悬停面板里；
+             调试模式开启时，「详情」列还能看到发给上游与上游返回的完整原始报文 ——
+             敏感词场景下排查提示词要看的就是那一份（运行日志页不再有这些逐请求的行）。
+
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/requests-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div ——
+             页面 CSS 用 .page 的直接子选择器（.panel 是它的直接子元素），中间插一层
+             会破坏 .panel 的布局。对外仍是 window.wbRequestsPanel = { load,
+             applyAutoRefresh, visibleColumns, clearParams, notifyCleared }。
+             这一页的**页面骨架类名照旧**（.panel / .panel-head / .log-filters /
+             .log-list / .panel-foot / .log-pager …），换掉的只是里面的控件。 -->
+        <section class="page" data-page="requests"></section>
+
+        <!-- ─── 设置 ───
+             整页由 React 岛渲染（desktop-tauri/ui-islands/src/islands/settings-page.tsx，
+             随 islands/ui.js 一起加载）。岛直接挂在这个 section 上、不套宿主 div ——
+             页面 CSS 用 .page 的直接子选择器，中间插一层会破坏 .settings-layout 的布局。
+             对外仍是 window.wbSettingsPanel = { load, render, renderRetention, renderRetry,
+             renderDebug, renderSanitize, renderPrompt, renderStorage, showCategory }。
+             分类导航 / 面板的类名照旧（.settings-layout / .settings-nav / .settings-nav-item /
+             .settings-pane / .panel …），换掉的只是里面的控件。
+             **更新分类（标签是「更新」，data-cat 仍是 "about"）是另一个岛**
+             （islands/update-panel.tsx 的软件更新面板）的挂载点：设置页的岛会把它
+             原样渲染成空容器并同步提交首帧，那个岛在模块加载期就把它接管过去 ——
+             别把这一块从岛的树里拿掉。 -->
+        <section class="page" data-page="settings"></section>
+
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 添加账号弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/add-account-modal.tsx（组件库 Dialog），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。
+       注意：里面的 id（web-login-button 等）由岛渲染 —— 静态 DOM 留着会出现重复 id，
+       登录引擎会绑到隐藏的旧节点上。 -->
+
+  <!-- 账号设置弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/accounts-dialogs.tsx（组件库 Dialog），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <!-- 批量操作弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/accounts-dialogs.tsx（组件库 Dialog），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <!-- 保留天数改小确认弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/settings-page.tsx（组件库 AlertDialog），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- ─── 通用确认弹窗 ───
+       替代原生 confirm()：Tauri 的 WebView 里原生 confirm 不弹窗直接放行，
+       危险操作（清空 / 删除）必须走这个。确认键样式与文案由调用方给，
+       危险操作传 okClass="danger"；Promise 化，用法与 confirm() 同构。
+       已迁到组件库：实现见 ui-islands/src/islands/confirm-dialog.tsx，随
+       islands/ui.js 一起加载，对外仍是 window.wbConfirm.ask(options)，
+       13 处调用点一行都不用改 —— 所以这里不再有常驻 DOM（弹窗按需建、关即卸）。 -->
+
+  <!-- ─── 数据结构升级（旧 JSON/JSONL → 单个 SQLite 库）───
+       本次更新把存储换成了单个 SQLite 数据库。改造后**没有弹窗**：
+       upgrade-panel.js 在启动时探测一次，有待迁移的旧文件就直接导入
+       （升级没有选项、不能取消，弹窗只是一道多余的坎，且它的「稍后」会让
+       账号一直空着）。
+       旧数据只改名为 *.migrated 备份、**绝不删除**；过程与结果都由 toast 告知
+       （用户没点过任何东西，程序在搬数据时必须让他知道文件还在）。 -->
+
+  <!-- ─── 请求详情弹窗 ───
+       三个标签：请求详情（列表行数据的完整展开）、预览对话（下游原文
+       /api/stats/requests/raw 解析出的对话气泡）、原始报文（调试模式保存的
+       上游原始报文：请求头（凭据类已脱敏）/ 请求体 / 响应头 / 响应体四块，
+       调试模式没开时整个标签隐藏）。报文由 /api/debug/traffic?id= 按需拉取
+       （列表接口不带报文，见后端 debug_api 的模块头）；三个标签的数据在
+       打开时并行拉取，切换不发请求。
+       已迁到组件库：实现见 ui-islands/src/islands/request-detail.tsx，随
+       islands/ui.js 一起加载，对外仍是 window.wbRequestDetail.open(id, row) /
+       .close()，所以这里不再有常驻 DOM（弹窗按需建、关即卸）。 -->
+
+  <!-- 「检测到更新」弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/update-panel.tsx，随 islands/ui.js
+       一起加载；由 app.js 的定时检查经 wbUpdatePanel.showUpdateModal(info) 触发，
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <!-- 更换端口弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/port-panel.tsx，随 islands/ui.js
+       一起加载；点击时建、关闭即卸，所以这里不再有常驻 DOM。
+       注意：它此前占用的是 #port-modal 一族 id，现在由 React 自建。 -->
+
+  <!-- 添加模型映射弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/models-page.tsx（组件库 Dialog 一族），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <!-- 添加自定义模型弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/models-page.tsx（组件库 Dialog 一族），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。 -->
+
+  <!-- 新建 / 编辑网关 Key 弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/keys-page.tsx（组件库 Dialog 一族），
+       点击时建、关闭即卸，所以这里不再有常驻 DOM。
+       两个多选（可用提供商 / 可用模型）仍走 select.js 的原生 select 增强 ——
+       组件库目前没有多选下拉，见该岛文件头的说明。 -->
+
+  <script src="icons.js"></script>
+  <!-- 表格列设置已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/table-col-settings.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbColSettings = { register, apply, configOf,
+       syncStaticHead, close }。四张表在**加载期**就 register，所以 islands/ui.js 必须排在
+       所有表格脚本之前（它现在的位置满足这条，别再往后挪）。 -->
+  <!-- select.js（把原生 <select> 增强成触发器 + 浮层的自动增强脚本）已删除：
+       全站最后一个原生 <select> 随设置页迁到组件库的 Select 而消失，
+       现在页面里一个原生 <select> 都没有了（各页一律用 @ui 的 Select / MultiSelect）。
+       被它一并带走的还有 .select-shell 一族样式与「重建后要显式 sync」那套约定。 -->
+  <!-- 小问号提示增强：自动增强型组件，扫描 [data-tip] 即可工作，
+       业务模块一行都不用改；页面里的静态问号与各岛渲染出来的动态问号
+       都由它的 MutationObserver 接住。 -->
+  <script src="tooltip.js"></script>
+  <!-- Token 计量单位的展示口径（中文亿/万 ⇄ 英文 M/k）：报表页与请求日志页都读它，
+       设置页的开关写它，所以排在所有业务脚本之前，它们执行时就能用上。 -->
+  <script src="units.js"></script>
+  <script src="app.js"></script>
+  <!-- React 岛（源码 desktop-tauri/ui-islands/，产物已随仓库提交）。三类：
+       · 挂载点式：分段筛选（.island 宿主）、页面级面板（直接挂 .page section）；
+       · 自动增强式：带 data-island-input 的原生输入框，加载时就地升级
+         （含后续动态生成的，由 MutationObserver 接住），业务侧只写属性、不调 API；
+       · 命令式弹窗：import 即注册 window 接口，点击时建、关闭即卸（确认框 /
+         请求清理 / 获取模型 / 请求详情 / 并发上限 / 更换端口）。
+       **必须排在所有使用方的业务脚本之前**：调 window.wbSegmented.mount() 的有
+       accounts-filters.js / report.js / add-provider-forms.js；
+       读岛提供的界面接口的有 app.js（wbPortPanel 等）与一众面板。
+       所有岛打在同一份产物里：React 与 react-dom 只能有一份实例。
+       加新岛只需在 ui-islands/src/islands/ 下放一个文件（目录自注册），不必改这里。 -->
+  <!-- 筛选条件的跨次启动记忆（账号 / 模型 / 请求日志 / 日志四页共用的读写工具）：
+       纯 localStorage 存取、无任何依赖，排在所有消费面板之前即可。
+       必须在 islands/ui.js **之前**：日志页的岛首次渲染就要读它（先读不到会兜住，
+       但排在前面才没有这一拍的抖动）。 -->
+  <script src="filter-memory.js"></script>
+  <script src="islands/ui.js"></script>
+  <!-- 自定义标题栏（桌面端）：主窗口去掉了系统装饰（src-tauri/lib.rs 建窗处
+       decorations(false)），这里动态补一条 32px 的标题栏（左标题右三键，
+       拖动与双击最大化靠 data-tauri-drag-region）。网页端没有应用窗口，
+       脚本内部按 platform 守卫直接不渲染，body 布局因此不受影响。
+       它只依赖 workbuddyDesktop 与 icons.js，不依赖 wbApp；排在 app.js
+       之后仅为读取顺序整洁。 -->
+  <script src="titlebar.js"></script>
+  <!-- 端口状态面板已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/port-panel.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbPortPanel = { render, sync, portLabel, isReady }。 -->
+  <script src="clipboard.js"></script>
+  <!-- 网关页「可用模型」区块（渲染 / 本地过滤 / 刷新模型清单按钮）：必须排在
+       app.js 之后 —— 它在加载期就从 window.wbApp 取 esc / toast / getState
+       （跨文件引用走 wbApp 是本项目的既有约定，见 accounts-table.js）；
+       又必须在 app.js 末尾那次 refresh() 之前执行完 —— 所有脚本都是同步加载，
+       refresh() 是异步的（首个 await 之后才轮到渲染），排在 app.js 之后即可。
+       同时它自带加载期的 DOM 绑定（搜索框 input、刷新按钮 click），
+       因此必须排在 index.html 里那两个元素之后（本文件底部，天然满足）。 -->
+  <!-- 思考等级组件与自定义提供商的模型清单数据源都已并入模型管理页的岛
+       （models-reasoning.ts / models-custom-source.ts，由 models-page.tsx import）。
+       wbModelsReasoning 只被本页用，已不再挂到 window；wbModelsCustom 仍挂在 window 上
+       —— 「获取模型」弹窗的批量导入要调它的 addModels。 -->
+  <!-- 「获取模型」弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/models-fetch-modal.tsx，随 islands/ui.js
+       一起加载，对外仍是 window.wbModelsFetchModal.open({providerId, custom, name,
+       onDone, onRefreshed})。 -->
+  <!-- 模型管理页已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/models-page.tsx
+       （数据层 models-panel-state.ts / models-reasoning.ts / models-custom-source.ts 是
+       普通模块，不是岛），随 islands/ui.js 一起加载，对外仍是
+       window.wbModelsPanel 与 window.wbModelsCustom。 -->
+  <!-- 网关 Key 页（多把 Key 的列表 / 新建 / 启停 / 删除 / 可用范围限制）：
+       同样依赖 wbApp，排在 app.js 之后。选项来源里用到 wbProviders.labelOf
+       （可用提供商的展示名）与主状态的 models（可用模型的候选），两者都是
+       **运行期**读取，不依赖加载顺序。 -->
+  <!-- 网关 Key 页已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/keys-page.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbKeysPanel = { load, render,
+       visibleColumns }。 -->
+  <!-- 网页登录的交互引擎（WorkBuddy 与小浣熊共用）：等待态 / 取消 / 按钮复位 / 成功收尾
+       只实现一次，两家各交一份配置。必须在 add-account.js 之前 —— 后者在加载期就要用它
+       建 WorkBuddy 那一份（DOM 在下面那个弹窗里），也必须在 add-provider-forms.js 之前
+       —— 小浣熊那份由它建。 -->
+  <script src="web-login.js"></script>
+  <!-- 手机验证码登录的交互引擎（当前只有 AutoClaw 用）：与小浣熊的网页登录是两套
+       东西 —— 那条链路开窗口等回调，这条在本弹窗里「发码 → 填码 → 换 token」。
+       必须在 add-provider-forms.js 之前 —— 加载期由它建 AutoClaw 那一份。 -->
+  <script src="sms-login.js"></script>
+  <!-- 阿里云无痕验证（滑块）求解器 —— **共用模块**：AutoClaw 的 OAuth 登录与
+       ZCode 的「周末套餐领取」都要过这道风控，求解过程完全一致（只有拿到验证串
+       之后干的事不同），因此只留一份实现。
+       必须排在两个消费者（下面那行 autoclaw-oauth.js 与 zcode-claim.js）之前：
+       它们在加载期就取 `window.wbAliyunCaptcha`。 -->
+  <script src="aliyun-captcha.js"></script>
+  <!-- AutoClaw 国际版的 OAuth 网页登录（Zai / Google）。单独一个文件是因为它的
+       顺序与另外五家相反：点按钮后先在**本弹窗**里跑阿里云风控验证码（浏览器端
+       SDK，从 o.alicdn.com 加载），拿到验证串才去换授权地址、再交壳开窗口。
+       必须在 add-provider-forms.js 之前 —— 加载期由它建国际版那一份。 -->
+  <script src="autoclaw-oauth.js"></script>
+  <!-- ZCode「周末套餐」的探测与领取（账号页那一列按钮）。
+       依赖 window.wbAccountsView 的列注册与 window.wbAliyunCaptcha。 -->
+  <script src="zcode-claim.js"></script>
+  <!-- CodeArts 的「领福利」流程（与上面 zcode-claim.js 同一约定：岛只把账号对象递过去，
+       探测 → 确认 → 领取 → 回读二次确认这四步都在这个引擎里，它要问的是管理接口
+       而不是本页的普通 fetch —— 桌面壳里管理接口要走 Tauri 的 api_request 命令）。
+       界面上那颗按钮的判据（能力位 welfare）与台账读数都在岛上，见
+       ui-islands/src/islands/accounts-domain.ts 的 supportsWelfare / welfareStateOf。 -->
+  <script src="codearts-welfare.js"></script>
+  <!-- ZCode 活动套餐通道的**验证码令牌池守卫**：后台循环向网关问库存，需要时用
+       无痕验证静默铸令牌（`wbAliyunCaptcha.mintTraceless`）并推回网关 —— 活动套餐
+       的推理端点每条请求都要一个这种令牌，而转发是后台发生的（没有让用户拖滑块的
+       机会）。必须排在 aliyun-captcha.js 之后：它加载完就自启，第一轮就要用那个模块。 -->
+  <script src="zcode-captcha-pool.js"></script>
+  <!-- 提供商目录：provider 摘要与「作用提供商」写入的唯一前端入口。
+       必须排在所有消费者（accounts-groups / logs-panel）之前 -->
+  <script src="providers.js"></script>
+  <!-- 自定义提供商的预置目录（纯常量，无依赖）：add-provider-forms.js 第 1 步的
+       「自定义」分段与 add-custom-provider.js 的预填都要读它，排在两者之前 -->
+  <script src="preset-providers.js"></script>
+  <!-- 账号页整页已迁到组件库：岛见 ui-islands/src/islands/accounts-page.tsx，
+       数据与逻辑拆在旁边的 accounts-shared.ts / accounts-domain.ts / accounts-columns.ts /
+       accounts-store.ts / accounts-data.ts / accounts-panels.tsx / accounts-dialogs.tsx
+       （都是普通模块，不是岛）。对外仍是 window.wbAccountsView / wbAccountsModel /
+       wbAccountPanel 等接口 —— 哪些保留在 window 上、哪些并进岛里，见 accounts-data.ts 的说明。 -->
+  <!-- 列宽拖动（模型管理 / 网关 Key / 请求日志三张表）：与 accounts-columns.js 并列，
+       各管各的列宽口径（账号表是定宽像素预算，这三张是相对宽度）。
+       它启动时就把表头把手插好并绑好委托，所以排在靠后（DOM 里的表格与列表都已存在）；
+       请求日志的表头是整块重绘的，它自己用 MutationObserver 补把手，不依赖面板脚本。 -->
+  <script src="table-columns.js"></script>
+  <!-- 并发上限小对话框已迁到组件库：实现见 desktop-tauri/ui-islands/src/conc-dialog.tsx，
+       随 islands/ui.js 一起加载（排在 accounts-view 之前），对外仍是
+       window.wbAccountConcDialog.open(account) / .close()，调用方不用改。 -->
+  <!-- 通用确认弹窗已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/confirm-dialog.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbConfirm.ask(options)。 -->
+  <!-- 日志面板已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/logs-panel.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbLogsPanel = { load, render, lastStats,
+       applyAutoRefresh, showCategory }。 -->
+  <!-- 请求日志的两块「独立小件」：
+       · request-hover          列表里重试 / 敏感词两枚标签的悬停面板（整表重绘时还负责
+                                锚点迁移，宿主在重绘前后调 beforeListRedraw /
+                                afterListRedraw 通知它）。已迁到组件库（见
+                                ui-islands/src/islands/request-hover.tsx），
+                                面板岛在挂载时调 wbRequestHover.bind 把委托挂到列表上。
+       · conversation-preview   「预览对话」的纯渲染（原文 → 气泡 HTML），没有加载期
+                                行为。消费方是详情弹窗（已迁到组件库，见
+                                ui-islands/src/islands/request-detail.tsx），它按原样
+                                调用 window.wbConversationPreview.render。 -->
+  <!-- 进行中请求的阶段渲染（request-phase.js）已随面板并入同一个岛
+       （ui-islands/src/islands/requests-page.tsx），对外仍是 window.wbRequestPhase ——
+       详情弹窗（request-detail.tsx）与列表的状态列读的是同一份。 -->
+  <!-- 请求日志的悬停面板已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/request-hover.tsx，随 islands/ui.js 一起加载，
+       对外仍是 window.wbRequestHover = { bind, close, hasProcessFacts, beforeListRedraw,
+       afterListRedraw }（requests-panel.js 在加载期就调 bind，所以它必须排在后面）。 -->
+  <script src="conversation-preview.js"></script>
+  <!-- 请求详情弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/request-detail.tsx，随 islands/ui.js
+       一起加载，对外仍是 window.wbRequestDetail.open(id, row) / .close()。 -->
+  <!-- 请求日志面板已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/requests-page.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbRequestsPanel = { load, applyAutoRefresh,
+       visibleColumns, clearParams, notifyCleared }。 -->
+  <!-- 请求日志的「清理」弹窗已迁到组件库：实现见
+       desktop-tauri/ui-islands/src/islands/request-clear-modal.tsx，随 islands/ui.js
+       一起加载，对外仍是 window.wbRequestClearModal.open()（无参数，打开即拉预览）。 -->
+  <!-- 定时任务面板已迁到组件库：实现见 desktop-tauri/ui-islands/src/islands/tasks-panel.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbTasksPanel.load()。 -->
+  <!-- 报表面板与账号页的代理表单都已迁到组件库，随 islands/ui.js 一起加载：
+       · 报表页（内部标识仍是 overview）→ ui-islands/src/islands/report-page.tsx
+         （图表仍是手写 SVG，不依赖任何图形库）
+       · 代理表单 → ui-islands/src/islands/accounts-dialogs.tsx（React 组件，多实例不串台） -->
+  <!-- 「登录 / 添加账号」这一整套（提供商分叉 / 各家表单块 / 从其他工具导入 /
+       自定义提供商）已迁到组件库：岛见 ui-islands/src/islands/add-account-modal.tsx，
+       旁边那几个 add-account-*.ts / add-provider-*.tsx / add-custom-provider.tsx 是普通
+       模块（不是岛，不会被目录自注册加载）。对外仍是
+       window.wbAddAccountModal.open() / .close() 与 window.wbAccountAddForms。
+       五个登录引擎（web-login / sms-login / autoclaw-oauth / aliyun-captcha /
+       zcode-claim）原样保留、由岛调用，容器契约没变。 -->
+  <script src="custom-provider-ui.js"></script>
+  <!-- 账号设置 / 批量操作弹窗（原 account-panel.js）已迁到组件库：
+       实现见 desktop-tauri/ui-islands/src/islands/accounts-dialogs.tsx，
+       随 islands/ui.js 一起加载，对外仍是 window.wbAccountPanel.open(id) 等接口。 -->
+  <!-- Markdown 渲染器：更新日志用。纯函数、无依赖，只认白名单语法（见文件头说明）；
+       必须在 islands/ui.js 之后加载 —— 软件更新面板（update-panel.tsx）渲染更新
+       日志时要读 window.wbMarkdown.render。 -->
+  <script src="markdown.js"></script>
+  <!-- 软件更新面板与设置页都已迁到组件库，随 islands/ui.js 一起加载：
+       · 软件更新面板 → ui-islands/src/islands/update-panel.tsx
+       · 设置页（含保留天数确认框）→ ui-islands/src/islands/settings-page.tsx
+       设置页对外仍是 window.wbSettingsPanel 的九个方法，调用方一行未改。 -->
+  <!-- 数据结构升级弹窗：启动时问一次 /api/upgrade，有待迁移数据就弹。
+       排在最后：它的 refreshPanels() 要调各面板的 load()，那些都得先挂好 -->
+  <script src="upgrade-panel.js"></script>
+</body>
+</html>

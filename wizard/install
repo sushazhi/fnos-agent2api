@@ -1,0 +1,23 @@
+[
+  {
+    "stepTitle": "🚀 欢迎使用 Agent2API 网关",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "把多个 <b>AI 服务商账号</b>包装成 <b>OpenAI 兼容 API</b>（上游 agent2api），并自带官方 Web 控制台。<b>无需 Docker、无需 Node.js 运行时</b>，安装即可用。"
+      },
+      {
+        "type": "tips",
+        "helpText": "🖥️ <b>控制台</b>（统一网关，仅管理员）：账号管理、模型中心、API 密钥、日志、请求记录与对话测试台。<b>无需另设登录密码</b>，飞牛管理员打开即用。<br>🔌 <b>下游接入</b>（任意 OpenAI SDK 直连）走<b>独立端口</b>：<code>http://&lt;飞牛IP&gt;:3065/v1</code><br>（网关路径仅供面板自身使用，外部客户端连不通）"
+      },
+      {
+        "type": "tips",
+        "helpText": "🧩 <b>运行时说明</b>：上游为 Rust 静态二进制，SQLite 已静态链接，<b>不依赖应用中心的 Node.js 运行时</b>。<br>内置 7 个服务商适配：WorkBuddy、小浣熊、CatPaw、AutoClaw、Qoder、Cline Free、Cline Pass。"
+      },
+      {
+        "type": "tips",
+        "helpText": "⚠️ <b>使用前提</b>：需自备已获授权的各服务商账号。账号凭据会在应用数据目录中<b>以明文存储</b>，请勿在多人共享的设备上使用。本应用仅用于私有环境下的个人账号管理，请遵守各上游服务条款。"
+      }
+    ]
+  }
+]

@@ -1,0 +1,141 @@
+/* ─────────────────────────────────────────────
+   表格列设置：锚点按钮的开关态 + 列对齐。
+   四张表（账号 / 模型管理 / 网关 Key / 请求日志）共用。
+
+   ── 为什么独立成一个文件、且排在最后 ────────────────────────
+   这里剩下的两块都必须压在页面样式之上：
+
+   1. **列对齐**。各表都为「这一列该靠哪边」写了默认值
+      （`.models-table th.r`、`.acct-table td.cell-pick`、`.req-head .req-dur` …），
+      选择器特异性都在 (0,1,1) 一档。列设置的对齐是**用户选择**，必须能盖过它们 ——
+      靠提高特异性硬拼（写成 `.acct-table td.cell-pick.ta-center` 之类）意味着
+      每加一张表、每加一列都要再补一条；排到页面样式之后、用同等特异性即可，
+      级联顺序本身就是「用户配置优先于作者默认」的表达。
+      与 tooltip.css 「排在页面样式之后，需要时可覆盖各页面约束」的编排一致。
+
+   2. **锚点按钮的开关态**。按钮由岛命令式建出来、插进各页的批量栏（那里不归
+      React 管），所以它的样式留在这里而不是岛里。
+
+   浮层面板本身已不在本文件：它随面板迁到组件库的 Popover（ui-kit/src/popover.tsx），
+   定位 / 层级 / 卡片观感都由那边负责 —— 面板内容改由 Tailwind 工具类渲染，
+   `.colset-panel` / `.colset-row` / `.colset-align` 那一族样式已随之删除。
+   ───────────────────────────────────────────── */
+
+/* 拖动中锁住全局光标：拖的是面板里的行，但指针可能划到面板外，
+   光标与选择范围必须整页一致（岛在 pointerdown / pointerup 上挂这个类） */
+body.colset-dragging { cursor: grabbing; user-select: none; }
+
+/* 触发按钮：齿轮 + 文案。被选中（面板开着）时给一层浅底，
+   与它旁边那些「一次性动作」按钮区分开 —— 它是个开关。 */
+.colset-btn { display: inline-flex; align-items: center; gap: 5px; }
+.colset-btn svg { display: block; opacity: .8; }
+.colset-btn.open { border-color: var(--primary-bd); background: var(--primary-soft); color: var(--primary-fg); }
+.colset-btn.open svg { opacity: 1; }
+
+/* ─── 列对齐（三档）───
+   由列设置把 ta-left / ta-center / ta-right 写在表头格与数据格上。
+   「靠哪边」在不同布局里由三个不同属性决定，所以分三层：
+
+   1. `text-align` —— 管行内级内容（文字、badge、button、inline-flex 的
+      label.switch）。格子里若是块级 flex 容器，这一条不动它，见第 2 层。
+   2. `justify-content` —— 管块级 flex 容器的**主轴**对齐。各表都给这些容器
+      写了默认值（.acct-actions 是 flex-end、.prio 是 flex-start …），
+      所以选择器要够强。
+   3. `align-items` / `justify-self` —— 管竖排 flex 列（.req-dur 是右对齐的
+      两行读数）与靠边站的 grid 项（.req-detail）。
+
+   ── 特异性为什么写成「表前缀 + 格 + 类」 ──────────────────────
+   各表的默认对齐就在 (0,2,1) 这一档（`.models-table th.r`、
+   `.acct-table td.cell-pick`、`.acct-table thead th` 是 (0,1,2)），
+   所以规则必须 ≥ 该档；本文件排在所有页面样式**之后**，
+   同档时由级联顺序取胜（也就是「用户配置」压过「作者默认」）。
+   比它更高的那些（如 `.models-table tr.off td` 的透明度）不涉及对齐，互不干扰。 */
+
+/* ── 1. 文本对齐 ── */
+/* 账号表：`.acct-table thead th` (0,1,2) 与 `.acct-table td.cell-pick` (0,2,1) 都要压过 */
+.acct-table th.ta-left, .acct-table td.ta-left { text-align: left; }
+.acct-table th.ta-center, .acct-table td.ta-center { text-align: center; }
+.acct-table th.ta-right, .acct-table td.ta-right { text-align: right; }
+
+/* 模型管理 / 网关 Key：同表共用 models-table 类，压过 `.models-table th.r` */
+.models-table th.ta-left, .models-table td.ta-left { text-align: left; }
+.models-table th.ta-center, .models-table td.ta-center { text-align: center; }
+.models-table th.ta-right, .models-table td.ta-right { text-align: right; }
+
+/* 请求日志：格子是 grid 项（span），压过 `.req-head .req-dur` 与 `.req-row .req-dur` */
+.req-head > .ta-left, .req-row > .ta-left { text-align: left; }
+.req-head > .ta-center, .req-row > .ta-center { text-align: center; }
+.req-head > .ta-right, .req-row > .ta-right { text-align: right; }
+
+/* ── 2. 块级 flex 容器的主轴对齐 ── */
+
+/* 账号表 */
+.acct-table td.ta-center > .acct-actions,
+.acct-table td.ta-center > .prio,
+.acct-table td.ta-center > .pv,
+.acct-table td.ta-center > .acct-name,
+.acct-table td.ta-center > .acct-sub,
+.acct-table td.ta-center > .status-tags { justify-content: center; }
+
+.acct-table td.ta-right > .acct-actions,
+.acct-table td.ta-right > .prio,
+.acct-table td.ta-right > .pv,
+.acct-table td.ta-right > .acct-name,
+.acct-table td.ta-right > .acct-sub,
+.acct-table td.ta-right > .status-tags { justify-content: flex-end; }
+
+/* 模型管理 / 网关 Key */
+.models-table td.ta-center > .mid,
+.models-table td.ta-center > .row-actions,
+.models-table td.ta-center > .keycell { justify-content: center; }
+
+/* .aliases 是纵向容器（每条绑定一行），水平对齐走 align-items 而不是
+   justify-content —— 主轴已经竖过来了，justify 会变成上下撑开 */
+.models-table td.ta-center > .aliases { align-items: center; }
+
+.models-table td.ta-right > .mid,
+.models-table td.ta-right > .row-actions,
+.models-table td.ta-right > .keycell { justify-content: flex-end; }
+
+.models-table td.ta-right > .aliases { align-items: flex-end; }
+
+/* ── 3. 竖排读数与靠边的 grid 项 ── */
+
+/* 这些格子里是「竖着排的几行」（时间 / 提供商账号 / 用时 / 用量），
+   靠 align-items 决定整块贴哪边 —— 它们的 text-align 管不到自己的子项
+   （align-items: flex-end 之类的默认值写在各自的列样式里）。
+   底部的 .req-time 还自带 flex-direction: column，所以这一层同样必要。 */
+.req-row > .req-time.ta-left,
+.req-row > .req-target.ta-left,
+.req-row > .req-usage.ta-left { align-items: flex-start; }
+
+.req-row > .req-time.ta-center,
+.req-row > .req-target.ta-center,
+.req-row > .req-usage.ta-center { align-items: center; }
+
+.req-row > .req-time.ta-right,
+.req-row > .req-target.ta-right,
+.req-row > .req-usage.ta-right { align-items: flex-end; }
+
+/* 重试列是**横向**标签容器（两枚并排放不下才换行，见 page-requests.css），
+   所以它的三档落在主轴 justify-content 上，不在上面那一层。 */
+.req-row > .req-retry.ta-left { justify-content: flex-start; }
+.req-row > .req-retry.ta-center { justify-content: center; }
+.req-row > .req-retry.ta-right { justify-content: flex-end; }
+
+/* 用时列是「右对齐」的两行读数：grid 项默认 stretch、内容自身 align-items: flex-end，
+   所以要改的是内容盒的 align-items，而不是格子的 text-align。 */
+.req-row > .req-dur.ta-left { align-items: flex-start; }
+.req-row > .req-dur.ta-center { align-items: center; }
+.req-row > .req-dur.ta-right { align-items: flex-end; }
+
+/* 详情列靠 justify-self 贴右（它不是靠 text-align）：跟随用户选择移动 */
+.req-row > .req-detail.ta-left { justify-self: start; }
+.req-row > .req-detail.ta-center { justify-self: center; }
+.req-row > .req-detail.ta-right { justify-self: end; }
+
+/* ─── 窄窗口下把对齐让回页面的重排规则 ───
+   请求日志在 1200px 以下重排成四行，那时列位置由媒体查询接管（轨道已经不是
+   八条、顺序也变了），用户设的对齐不再适用于「第几列」这个前提。
+   这里不做额外处理：媒体查询里的 grid-row / grid-column 与上面的对齐声明
+   互不干扰，只是重排后「按列对齐」失去意义，窗口拉宽自然恢复。 */

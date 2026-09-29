@@ -1,0 +1,108 @@
+/* ─────────────────────────────────────────────
+   账号页：列表容器 / 批量栏 / 表脚
+   默认窗口 1060px、最小 820px。侧栏 216/68px + 内边距后，
+   列表区可用宽度约 700–1500px。
+
+   ── 卡片时代的骨架规则已全部删除 ───────────────────────────
+   账号列表从「按 provider 分组的卡片网格」改成「四家混排的一张表」之后，
+   卡片骨架（.acct-grid / .acct-group-title / .acct-card 及其 .selected /
+   .disabled 与窄卡片容器查询、.card-head / .who / .who-name / .who-meta /
+   .card-state / .card-note / .card-foot / .rank / .card-actions / .order-btns /
+   .row-panels）就再没有任何引用；表格化的这一轮里把整页迁成了 React 岛，
+   ⋯ 菜单也换成了组件库的浮层，最后两个还有引用的旧壳（.more-menu、
+   .row-panels）随之失效，于是整族一并删除。
+   表格那边的样式在 page-accounts-table.css。
+
+   （设置页「账号列表两侧留白」开关已随功能移除，其 :root[data-content]
+   两档规则也已删除。）
+   ───────────────────────────────────────────── */
+
+/* ─── 页面限宽居中（超宽屏可读性）────────────────────────────
+   表格是「固定列 + 账号列吃剩余宽度」的结构：内容区一宽，多出来的宽度全部灌进
+   账号列，账号名与优先级之间隔着几百像素的空白，读起来像表格断成了两截。
+   限宽 1400px 居中后，超宽部分的留白落在页面外沿（版心两侧），而不是表格中间。 */
+.page[data-page="accounts"] {
+  width: 100%;
+  max-width: 1400px;
+  margin-inline: auto;
+}
+
+/* 表格容器：外层定宽，内部统一滚动 */
+.account-table {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 这里只需要「按圆角裁掉子内容」，不是滚动：hidden 会把面板变成滚动容器，
+     账号表整表重建（tbody.innerHTML 整体替换，见 accounts-view.js 的 render）时，
+     浏览器的滚动补偿会把面板卷走一大截 —— 工具栏 / 批量栏 / 吸顶表头全被裁出
+     视野，看起来像整页坍缩；hidden 没有滚动条、也没有代码复位它，用户滚不回来。
+     layout.css 给 .panel 的 overflow: clip 在本元素上会被下面这条 hidden 覆盖
+     （本文件排在 layout.css 之后），所以必须在这里自己补上 clip。
+     clip 是纯裁剪、不可滚动；老内核不认识 clip 时回退到 hidden，行为同旧版。 */
+  overflow: hidden;
+  overflow: clip;
+}
+
+.acct-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 表格化：横向也允许滚动。表格有最小宽度（900px，见 page-accounts-table.css），
+     更窄时按列宽原样横滚，而不是把列压窄 —— 压缩会把操作列里的按钮折成两行。
+     卡片时代这里是 overflow-x: hidden（卡片网格自己会换行，不需要横滚）。 */
+  overflow-x: auto;
+  /* 整表重建时不做滚动锚定补偿：overflow-anchor 不继承，
+     .page.active 上的 none 管不到这个滚动容器自己（后代滚动容器会为自己的
+     滚动盒重新开启锚定）—— 与 .page.active / .models-table-wrap 的处理对齐。
+     这条只保列表自身的滚动位置；外层面板不跳靠的是 .account-table 的 clip，
+     单靠这条防不住（面板会被整体卷走）。 */
+  overflow-anchor: none;
+  /* 常驻预留滚动条槽：有无滚动条时列表区宽度一致，列数不会跳变 */
+  scrollbar-gutter: stable;
+  /* 列表区与所在卡片同色（--table-bg）：表格不再自成一层暗底。
+     区分行与行交给每行的 1px 分隔线（.acct-table td 的 --hairline），
+     而不是靠列表底比承载面更深 —— 那会让内容区在深浅两套主题里都突然「掉下去」一截。
+     横向滚动条槽仍由 scrollbar-gutter 常驻预留，背景不引起列宽跳动。 */
+  background: var(--table-bg);
+}
+/* ─── 批量栏 ───
+   夹在工具条与列表之间的一条状态带：通栏铺满面板，四角交给面板自身的圆角裁切。
+   底色与面板同色（--surface），只用一条 --hairline 与上下分开 ——
+   这一带不需要靠明度差自证存在，多一层色带反而会再把内容区切成几段。 */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.batch-bar.active { background: var(--primary-soft); border-bottom-color: var(--primary-bd); }
+
+.batch-select-all { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; white-space: nowrap; }
+.batch-select-all input { width: 14px; height: 14px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.batch-select-all span { white-space: nowrap; }
+
+.batch-count { color: var(--text-3); white-space: nowrap; }
+.batch-count b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.batch-hidden { color: var(--warn); font-size: 11px; }
+
+.batch-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+.batch-actions button {
+  height: 25px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  font-size: 11.5px;
+}
+
+/* ─── 页脚 ───
+   账号页的页脚现在也用通用表格页脚（islands/table-shell.tsx 的 TableFooter →
+   .panel-foot + .table-foot-ctl 一族，见 layout.css）：原先那一套 .table-foot
+   专属样式（同底色 + 一条 --hairline 分隔线）随「五张表页脚一致」一并去掉。 */
+

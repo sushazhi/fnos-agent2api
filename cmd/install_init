@@ -1,0 +1,29 @@
+#!/bin/bash
+# cmd/install_init - 安装前置：只做校验，不创建数据目录。
+#
+# 重要（实测结论，2026-09）：
+#   本应用使用 run-as=package。install_init 阶段以受限身份运行，
+#   此时**不能**创建 ${TRIM_PKGVAR}（即 @appdata 下的应用数据目录）——
+#   该目录由 fnOS 在挂载 var 软链时创建，或推迟到 install_callback。
+#   目录创建放到 install_callback（此时环境已就绪）。
+#
+# 注意：本脚本必须自包含，不能 source cmd/lib.sh（该文件不会随包分发到此处）。
+
+set -u
+
+echo "正在检查 Agent2API 网关安装环境..."
+
+# 只做非侵入式校验：确认关键环境变量已注入。
+if [ -z "${TRIM_PKGVAR:-}" ]; then
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        echo "Error: 安装器未提供 TRIM_PKGVAR，环境异常" >> "$TRIM_TEMP_LOGFILE"
+    fi
+    echo "Error: 安装器未提供 TRIM_PKGVAR，环境异常" >&2
+    exit 1
+fi
+
+# 本应用不依赖应用中心 Node.js 运行时：上游 agent2api 为 Rust 静态二进制，
+# SQLite 以 bundled 方式静态链接，运行时只需 glibc（≥ 2.34）。
+
+echo "安装前置检查通过"
+exit 0

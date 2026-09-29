@@ -1,0 +1,198 @@
+#!/bin/bash
+# cmd/main - 应用生命周期控制（start/stop/restart/status）
+#
+# 进程模型：
+#   fngateway（本脚本管理的唯一 PID）
+#     ├─ 监听 ${TRIM_APPDEST}/agent2api.sock（统一网关入口，剥前缀 + 改写 + 免密注入）
+#     ├─ 监听 ${TRIM_SERVICE_PORT}（下游独立端口，仅放行 /v1/* 与 /health）
+#     └─ 托管 agent2api-server 子进程（127.0.0.1 回环，上游原样二进制，零改动）
+#
+# 关键设计：
+#   - 只管理 fngateway 一个 PID；agent2api-server 子进程由 fngateway 拉起并随其退出。
+#   - 所有路径走 TRIM_* 变量，不硬编码安装目录。
+#   - status 契约：运行返回 0，未运行返回 3，未知参数返回 1。
+
+APP_NAME="agent2api"
+BIN_DIR="${TRIM_APPDEST}/bin"
+LOG_FILE="${TRIM_PKGVAR}/main.log"
+PID_FILE="${TRIM_PKGVAR}/fngateway.pid"
+SOCKET_FILE="${TRIM_APPDEST}/${APP_NAME}.sock"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null
+}
+
+error_exit() {
+    local msg="$1"
+    echo "Error: $msg" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    log_msg "ERROR: $msg"
+    exit 1
+}
+
+# check_process 判断 PID 是否存活（兼容无 /proc 的环境）。
+check_process() {
+    local pid=$1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# read_pid 读取 PID 文件内容。
+read_pid() {
+    [ -r "$PID_FILE" ] && head -n 1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# pick_binary 按架构选择 fngateway 二进制。
+pick_binary() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) echo "${BIN_DIR}/fngateway-linux-amd64" ;;
+        aarch64|arm64) echo "${BIN_DIR}/fngateway-linux-arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+# pick_child 按架构选择上游 agent2api-server 二进制（由 fngateway 拉起，这里只做校验）。
+pick_child() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) echo "${BIN_DIR}/agent2api-server-linux-amd64" ;;
+        aarch64|arm64) echo "${BIN_DIR}/agent2api-server-linux-arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+status() {
+    local pid
+    pid=$(read_pid)
+    if check_process "$pid"; then
+        echo "$APP_NAME is running (PID: $pid)"
+        return 0
+    fi
+    # 残留 PID 文件：清理掉，避免误判。
+    [ -f "$PID_FILE" ] && rm -f "$PID_FILE"
+    echo "$APP_NAME is not running"
+    return 3
+}
+
+start_process() {
+    if status > /dev/null 2>&1; then
+        log_msg "$APP_NAME is already running"
+        echo "$APP_NAME 已在运行"
+        return 0
+    fi
+
+    log_msg "Starting $APP_NAME..."
+
+    mkdir -p "${TRIM_PKGVAR}" || error_exit "无法创建数据目录 ${TRIM_PKGVAR}"
+
+    local BIN
+    if ! BIN=$(pick_binary); then
+        error_exit "不支持的硬件架构: $(uname -m)"
+    fi
+    [ -f "$BIN" ] || error_exit "网关程序不存在: $BIN"
+    [ -x "$BIN" ] || chmod +x "$BIN" || error_exit "无法设置可执行权限: $BIN"
+
+    # 上游 agent2api-server 二进制：由 fngateway 负责拉起。这里做前置校验，
+    # 缺失时立即失败，避免出现「应用显示已启动、面板却一直 502」这种难排查的现象。
+    # 本应用不依赖应用中心 Node.js 运行时（上游为 Rust 静态二进制，仅依赖 glibc ≥ 2.34）。
+    local CHILD
+    if ! CHILD=$(pick_child); then
+        error_exit "不支持的硬件架构: $(uname -m)"
+    fi
+    [ -f "$CHILD" ] || error_exit "上游服务程序不存在: $CHILD"
+    [ -x "$CHILD" ] || chmod +x "$CHILD" || error_exit "无法设置可执行权限: $CHILD"
+
+    # 清理上次异常退出残留的 socket，否则 bind 会失败。
+    rm -f "$SOCKET_FILE" 2>/dev/null
+
+    # 数据目录作为工作目录；agent2api-server 的相对路径全部由 fngateway 显式
+    # 转为绝对路径注入，不依赖 CWD。
+    cd "${TRIM_PKGVAR}" || error_exit "无法进入数据目录 ${TRIM_PKGVAR}"
+
+    nohup "$BIN" >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+    printf "%s" "$pid" > "$PID_FILE"
+
+    # 等待就绪（最多 30 秒）：fngateway 需要拉起 agent2api-server 并等待其监听。
+    local count=0
+    while [ $count -lt 30 ]; do
+        if ! check_process "$pid"; then
+            log_msg "网关进程提前退出，日志尾部："
+            tail -n 30 "${LOG_FILE}" >&2 2>/dev/null
+            error_exit "服务启动失败，请查看日志: ${LOG_FILE}"
+        fi
+        if [ -S "$SOCKET_FILE" ]; then
+            log_msg "$APP_NAME started successfully (pid=$pid)"
+            echo ""
+            echo "=========================================="
+            echo "  Agent2API 网关已启动"
+            echo "  控制台:   飞牛桌面 → Agent2API 网关（仅管理员）"
+            if [ -n "${TRIM_SERVICE_PORT:-}" ]; then
+                echo "  下游接入: http://<飞牛IP>:${TRIM_SERVICE_PORT}/v1"
+            fi
+            echo "  数据目录: ${TRIM_PKGVAR}"
+            echo "  日志:     ${LOG_FILE}"
+            echo "=========================================="
+            echo ""
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+
+    # socket 未出现但进程还活着：仍算启动成功（可能较慢），如实提示。
+    log_msg "警告：等待 socket 超时，但进程仍在运行"
+    echo "服务已启动，但就绪检查超时，请稍后在应用页面重试"
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping $APP_NAME..."
+
+    local pid
+    pid=$(read_pid)
+
+    if ! check_process "$pid"; then
+        rm -f "$PID_FILE"
+        rm -f "$SOCKET_FILE" 2>/dev/null
+        log_msg "$APP_NAME was not running"
+        return 0
+    fi
+
+    # SIGTERM 让 fngateway 优雅关闭（它会一并停掉 agent2api-server 子进程）。
+    kill -TERM "$pid" 2>/dev/null
+
+    local count=0
+    while check_process "$pid" && [ $count -lt 20 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+
+    if check_process "$pid"; then
+        log_msg "优雅退出超时，强制结束 $pid"
+        kill -KILL "$pid" 2>/dev/null
+        sleep 1
+    fi
+
+    # 兜底：清理可能残留的 agent2api-server 子进程（避免占用回环端口）。
+    if [ -n "$BIN_DIR" ] && [ -d "$BIN_DIR" ]; then
+        pkill -f "${BIN_DIR}/agent2api-server-linux" 2>/dev/null
+    fi
+
+    rm -f "$PID_FILE"
+    rm -f "$SOCKET_FILE" 2>/dev/null
+    log_msg "$APP_NAME stopped"
+    return 0
+}
+
+case "$1" in
+    start)   start_process ;;
+    stop)    stop_process ;;
+    restart) stop_process; sleep 2; start_process ;;
+    status)  status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

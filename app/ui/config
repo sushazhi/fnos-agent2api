@@ -1,0 +1,17 @@
+{
+    ".url": {
+        "agent2api.Application": {
+            "title": "Agent2API 网关",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewaySocket": "agent2api.sock",
+            "gatewayPrefix": "/app/agent2api",
+            "url": "/app/agent2api",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        }
+    }
+}

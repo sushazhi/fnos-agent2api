@@ -1,0 +1,42 @@
+#!/bin/bash
+# cmd/install_callback - 安装后置：准备数据目录。
+#
+# 重要约束（skill lifecycle-hardening）：
+#   install_callback 在「重新安装」时同样会执行，因此**绝不能无条件重建**
+#   已存在的用户数据 —— 那会清空账号凭证与密钥。
+#
+# 鉴权说明：面板没有自带登录密码，鉴权由飞牛统一网关完成
+# （校验飞牛登录态并注入 X-Trim-* 用户上下文，仅管理员可访问），
+# 因此本脚本不生成任何口令。网关密钥（AGENT2API_PROXY_API_KEY）由
+# fngateway 首次启动时自动生成并存入 ${TRIM_PKGVAR}/apikey（0600），无需人工干预。
+
+set -u
+
+echo "正在配置 Agent2API 网关..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+
+# 数据目录创建放在这里（而非 install_init）：此阶段环境已就绪。
+if ! mkdir -p "$DATA_DIR"; then
+    echo "Error: 无法创建数据目录 ${DATA_DIR}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    echo "Error: 无法创建数据目录 ${DATA_DIR}" >&2
+    exit 1
+fi
+
+# data/ 上游 agent2api 的配置目录（AGENT2API_PROXY_HOME），
+#       内含 SQLite（账号凭据、API 密钥）与 config.json
+# home/ 子进程 HOME：上游默认配置目录是 ~/.agent2api，显式隔离到应用数据目录，
+#       避免把凭据写到系统账号的家目录里
+mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/home" || {
+    echo "Error: 无法创建应用子目录" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+}
+chmod 700 "${DATA_DIR}/data" 2>/dev/null
+chmod 700 "${DATA_DIR}/home" 2>/dev/null
+
+# 清理上次异常退出残留的 socket（重新安装场景）。
+rm -f "${TRIM_APPDEST}/agent2api.sock" 2>/dev/null
+
+echo "数据目录已就绪: ${DATA_DIR}"
+echo "安装完成。请从飞牛桌面「Agent2API 网关」图标打开控制台（仅管理员可见）。"
+exit 0
