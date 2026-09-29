@@ -101,11 +101,17 @@ jobs:
             echo "ERROR: 上游源码未就位 (${SRC_DIR})"; exit 1; }
 
       # 缓存 Rust 依赖：冷编译约 10 分钟，命中后只剩源码层重编。
-      # 源码在 SRC_DIR 下，target 由 --target-dir 显式指定在仓库根。
+      # workspaces 的写法是 `$workspace -> $target`，其中 **$target 相对 $workspace**，
+      # 不是相对仓库根 —— 写成 `-> target` 会指向
+      # .local-build/upstream-src/desktop-tauri/src-tauri/target（不存在），
+      # 缓存永远不命中且不报错。这里与下面 --target-dir 的
+      # ${GITHUB_WORKSPACE}/target 对齐：从 src-tauri 往上四层就是仓库根。
+      # 上游自带的 .cargo/config.toml 把 target-dir 指到 desktop-tauri/target，
+      # 但下面显式传了 --target-dir，以显式值为准（免得上游改了配置就悄悄失配）。
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .local-build/upstream-src/desktop-tauri/src-tauri -> target
+          workspaces: .local-build/upstream-src/desktop-tauri/src-tauri -> ../../../../target
 
       # arm64 需要 aarch64 的 C 工具链与 glibc 开发头文件 ——
       # rusqlite 的 bundled SQLite 与 ring 的 C/汇编源码要用 C 编译器。

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -74,4 +75,29 @@ func (w *rotatingWriter) Close() error {
 	err := w.file.Close()
 	w.file = nil
 	return err
+}
+
+// tailLines 返回日志尾部最后 n 行（用于把子进程死因直接摆到网关日志里）。
+//
+// 上游二进制的启动失败原因只打在它自己的 stderr 上（写进本 writer 的
+// agent2api.log）。若网关只记一句「上游退出: exit status 1」，用户还得再去找
+// 另一个文件；这里顺手摘几行贴出来，把排查从「翻日志」降到「看一眼」。
+func (w *rotatingWriter) tailLines(n int) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(w.path)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, "\r")
+	}
+	return strings.Join(lines, "\n")
 }

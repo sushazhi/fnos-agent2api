@@ -15,14 +15,18 @@
 // 网关路径 —— 与 D:\fnos 下 workbuddy2api / deepseek.harness 两个项目的结论一致。
 //
 // 为什么面板在网关下能免密登录：agent2api 的面板有两套鉴权入口 ——
-//   (a) 管理员账号 + 会话 Cookie（server/src/server/access.rs 的 panel gate）；
-//   (b) API Key（Authorization: Bearer / x-api-key，见 http::require_api_key）。
+//
+//	(a) 管理员账号 + 会话 Cookie（server/src/server/access.rs 的 panel gate）；
+//	(b) API Key（Authorization: Bearer / x-api-key，见 http::require_api_key）。
+//
 // 本应用**只用 (b)**：服务端把密钥注入 x-api-key，浏览器侧只放占位值。
 // 实测（v2.9.0）在只设 AGENT2API_PROXY_API_KEY、不注册管理员时：
-//   /api/panel/status → {"registered":false}
-//   /api/session 无密钥 → 401 panel_login_required；带 x-api-key → 200
-//   /v1/models 带密钥 → 200
-//   任何响应都不下发 Set-Cookie
+//
+//	/api/panel/status → {"registered":false}
+//	/api/session 无密钥 → 401 panel_login_required；带 x-api-key → 200
+//	/v1/models 带密钥 → 200
+//	任何响应都不下发 Set-Cookie
+//
 // 因此既不需要管理员口令，也完全绕开了「飞牛网关剥掉 Set-Cookie 导致登录弹回」
 // 这个坑（上游修此问题的 PR #41 在 v2.9.0 里尚未合并）。
 //
@@ -35,6 +39,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -240,6 +245,12 @@ func main() {
 		// 子进程是唯一功能载体：它死了留一个空壳没有意义，
 		// 直接退出让应用中心显示为「已停止」，用户可一键重启。
 		log.Printf("⚠️  上游 agent2api 退出: %v", childErr)
+		if tail := childLog.tailLines(6); tail != "" {
+			log.Printf("   上游最后输出（完整日志见 %s）:", filepath.Join(lay.pkgVar, "agent2api.log"))
+			for _, line := range strings.Split(tail, "\n") {
+				log.Printf("     | %s", line)
+			}
+		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -371,6 +382,22 @@ func startChild(lay layout, internalPort int, apiKey string, childLog *rotatingW
 		return nil
 	}
 
+	// 架构自检：二进制与本进程架构不符时，内核 exec 会以 ENOEXEC 失败，
+	// 而报错只说「exec format error」，不说是哪个架构错了。这种包多半是
+	// 打包时架构标错或放错了文件，先在这里点明，省一轮排查。
+	if err := checkELFArch(bin, runtime.GOARCH); err != nil {
+		log.Printf("⚠️  %v", err)
+	}
+
+	// 数据目录与 HOME 必须存在。上游自己的 db::open 会建配置目录，但它只在
+	// 开库那一步建；而各家提供商的 CLI 往 HOME 下写缓存时不会替你建 HOME，
+	// 缺目录就会以一个难懂的错误退出。这里统一先建好，两个目录都是幂等的。
+	for _, dir := range []string{filepath.Join(lay.pkgVar, "data"), filepath.Join(lay.pkgVar, "home")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Printf("⚠️  创建目录失败 %s: %v（上游可能因此启动失败）", dir, err)
+		}
+	}
+
 	env := append(os.Environ(), childEnv(lay, apiKey, strconv.Itoa(internalPort))...)
 
 	cmd := exec.Command(bin)
@@ -384,6 +411,41 @@ func startChild(lay layout, internalPort int, apiKey string, childLog *rotatingW
 	}
 	log.Printf("  上游进程:   pid=%d %s", cmd.Process.Pid, bin)
 	return cmd
+}
+
+// checkELFArch 读 ELF 头确认 e_machine 与期望架构一致。
+//
+// 只处理小端 ELF64（本应用的两个架构都是）；无法解析时返回 nil —— 这不是
+// 校验器，只用来把「架构放错」这种常见错误讲清楚，不阻断启动（真错了内核会拦）。
+func checkELFArch(path, want string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	head := make([]byte, 20)
+	n, readErr := io.ReadFull(f, head)
+	// 魔数只有 4 字节，所以「不是 ELF」在短文件上也能判定；判不出来才放手。
+	if n >= 4 && !bytes.Equal(head[:4], []byte{0x7f, 'E', 'L', 'F'}) {
+		return fmt.Errorf("上游程序 %s 不是 ELF 可执行文件，无法在本机运行", path)
+	}
+	if readErr != nil {
+		return nil // 头都不完整：交给内核判断，这里不下结论
+	}
+	if head[4] != 2 || head[5] != 1 { // EI_CLASS=ELF64, EI_DATA=小端
+		return nil
+	}
+	machine := uint16(head[18]) | uint16(head[19])<<8
+	wantMachine := map[string]uint16{"amd64": 0x3E, "arm64": 0xB7}[want]
+	if wantMachine != 0 && machine != wantMachine {
+		name := map[uint16]string{0x3E: "amd64", 0xB7: "arm64"}[machine]
+		if name == "" {
+			name = fmt.Sprintf("machine=0x%x", machine)
+		}
+		return fmt.Errorf("上游程序架构不符：本机是 %s，%s 是 %s（安装包装错了架构）",
+			want, filepath.Base(path), name)
+	}
+	return nil
 }
 
 // childEnv 构造上游子进程环境（相对路径一律显式给绝对路径，不依赖 CWD）。

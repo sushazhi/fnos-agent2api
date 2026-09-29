@@ -90,12 +90,12 @@ func TestRewriteHTMLManifestCrossorigin(t *testing.T) {
 func TestRewriteLocation(t *testing.T) {
 	p := NewPrefix("/app/agent2api")
 	cases := map[string]string{
-		"/login":                   "/app/agent2api/login",
-		"/app/agent2api/login":     "/app/agent2api/login",
-		"//evil.example.com/x":     "//evil.example.com/x",
-		"https://a.example.com/b":  "https://a.example.com/b",
-		"relative/path":            "relative/path",
-		"":                         "",
+		"/login":                  "/app/agent2api/login",
+		"/app/agent2api/login":    "/app/agent2api/login",
+		"//evil.example.com/x":    "//evil.example.com/x",
+		"https://a.example.com/b": "https://a.example.com/b",
+		"relative/path":           "relative/path",
+		"":                        "",
 	}
 	for in, want := range cases {
 		if got := p.RewriteLocation(in); got != want {
