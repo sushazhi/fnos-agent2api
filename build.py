@@ -115,6 +115,21 @@ FNPACK_VER = "1.2.3"
 BARE_ASSET_RE = re.compile(r'(?i)\b(?:src|href)\s*=\s*"([^"]+)"')
 ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
 
+# --- 面板模型图标 ---
+# 「添加账号」里的提供商图标全部是**裸相对路径**（预置列表走
+# preset-providers.js 的 iconOf() → `assets/providers/<file>.png`；反代列表
+# 走 islands/ui.js 里编译进去的 PROVIDER_ICONS），靠网关注入的
+# <base href="{前缀}/"> 才落到位。图标文件缺失不会让安装失败，只会让图标变成
+# 空白或首字母兜底 —— 又一个「装完才发现」的静默缺陷，所以这里显式核对。
+UI_PROVIDER_DIR = "ui/assets/providers"
+# 两个索引的写法不同，必须各配一条正则，否则会漏检一半（实测：只配下面第一条时
+# 只能匹配到 islands/ui.js 的 10 个反代图标，preset-providers.js 的 20 个预置
+# 图标全部漏掉 —— 因为后者写的是 `icon: 'openai.png'`，**没有**目录前缀）。
+#   反代（islands/ui.js）      : "assets/providers/openai.png"（完整路径字面量）
+#   预置（preset-providers.js）: icon: 'openai.png'（iconOf() 再拼目录）
+ICON_REF_RE = re.compile(r'assets/providers/([A-Za-z0-9._\-]+\.png)')
+ICON_DECL_RE = re.compile(r"""icon\s*:\s*['"]([A-Za-z0-9._\-]+\.png)['"]""")
+
 # 文本卫生检查跳过的扩展名（二进制文件不该按文本规则检查）
 BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".fpk", ".gz", ".tgz",
                ".zip", ".exe", ".so", ".dylib", ".db", ".woff", ".woff2"}
@@ -302,6 +317,39 @@ def check_webui():
                 + " —— fngateway 只改写相对路径，请复核 gateway.go 的 htmlAttrRe"
             )
         log(f"  index.html: {len(refs)} 个资源引用（根绝对路径 {len(root_abs)} 个）")
+
+    # 模型图标：目录必须在，且两个索引里引用到的每个图标都真实存在。
+    prov_dir = os.path.join(PROJECT_DIR, "app", "ui", "assets", "providers")
+    if not os.path.isdir(prov_dir):
+        problems.append("缺少 app/ui/assets/providers/（「添加账号」里的模型图标"
+                        "会全部空白，反代与预置两处都受影响）")
+    else:
+        on_disk = {n for n in os.listdir(prov_dir) if n.lower().endswith(".png")}
+        referenced = set()
+        # 两个索引写法不同，两条正则都要跑（见 ICON_DECL_RE 上方注释）。
+        for rel in ("ui/preset-providers.js", "ui/islands/ui.js"):
+            p = os.path.join(PROJECT_DIR, "app", *rel.split("/"))
+            if not os.path.exists(p):
+                problems.append(f"缺少 app/{rel}（模型图标索引未随包）")
+                continue
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            referenced |= set(ICON_REF_RE.findall(text))
+            referenced |= set(ICON_DECL_RE.findall(text))
+        # 预置图标是 iconOf() 运行期拼出的，兜底再核对一遍「声明数」是否够。
+        # 若上游改了 icon 的声明写法，两条正则可能同时失效，那时 referenced
+        # 会异常变小 —— 这里断言它不能少于磁盘图标数的一半，避免守卫静默失效。
+        if len(referenced) < len(on_disk) // 2:
+            problems.append(
+                f"模型图标索引只解析出 {len(referenced)} 个（磁盘有 {len(on_disk)} 个），"
+                "疑似上游改了 icon 声明写法 —— 请复核 build.py 的 ICON_REF_RE / ICON_DECL_RE"
+            )
+        missing = sorted(referenced - on_disk)
+        if missing:
+            problems.append("模型图标缺失（「添加账号」里对应项会空白）: "
+                            + ", ".join(missing[:8]))
+        log(f"  模型图标: 磁盘 {len(on_disk)} 个，被引用 {len(referenced)} 个，"
+            f"缺失 {len(missing)} 个")
 
     if problems:
         log("  ERROR: 上游 WebUI 预检未通过：")
@@ -913,6 +961,11 @@ def verify_fpk(fpk_path, arch):
             if rel not in inner_names:
                 msgs.append(f"缺失 {rel}（上游 WebUI 未随包，面板会白屏）")
                 ok = False
+
+        # 模型图标目录：缺了不会安装失败，只会让「添加账号」里的图标空白。
+        if not any(n.startswith(UI_PROVIDER_DIR + "/") for n in inner_names):
+            msgs.append(f"app.tgz 内缺少 {UI_PROVIDER_DIR}/（模型图标会全部空白）")
+            ok = False
 
         # 面板资源引用形态：fngateway 依赖裸相对路径
         if "ui/index.html" in inner_files:

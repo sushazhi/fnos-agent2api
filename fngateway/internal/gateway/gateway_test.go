@@ -25,6 +25,10 @@ func TestPrefixStrip(t *testing.T) {
 		{"/app/agent2api/islands/ui.js", "/islands/ui.js", true},
 		{"/app/agent2apix/api", "/app/agent2apix/api", false},
 		{"/other", "/other", false},
+		// 幂等：被重复加前缀时一路剥到底，不能只剥一层留下 /app/agent2api/api。
+		{"/app/agent2api/app/agent2api/api/session", "/api/session", true},
+		{"/app/agent2api/app/agent2api", "/", true},
+		{"/app/agent2api/app/agent2api/", "/", true},
 	}
 	for _, c := range cases {
 		got, ok := p.Strip(c.in)
@@ -40,6 +44,24 @@ func TestNewPrefixDefault(t *testing.T) {
 	}
 	if got := NewPrefix("/app/x/").Path; got != "/app/x" {
 		t.Fatalf("NewPrefix 未去掉尾斜杠: %q", got)
+	}
+}
+
+// 文档 URL 不带尾斜杠时（桌面入口 url = /app/agent2api），裸相对引用会被浏览器
+// 解析到上一级，模型图标（assets/providers/*.png）全部 404。
+// 注入 <base href="{前缀}/"> 把文档基址钉回前缀之下。
+func TestBaseTag(t *testing.T) {
+	p := NewPrefix("/app/agent2api")
+	if got, want := p.BaseTag(), `<base href="/app/agent2api/">`; got != want {
+		t.Fatalf("BaseTag() = %q, want %q", got, want)
+	}
+	// 前缀本身已去掉尾斜杠，这里再补一个，正好一个且只有一个。
+	if strings.Contains(p.BaseTag(), `//"`) {
+		t.Fatalf("BaseTag 出现双斜杠: %s", p.BaseTag())
+	}
+	// 直通模式（无前缀）不注入。
+	if got := (Prefix{}).BaseTag(); got != "" {
+		t.Fatalf("空前缀应返回空串，实际 %q", got)
 	}
 }
 
@@ -184,6 +206,36 @@ func TestBridgeScript(t *testing.T) {
 	// 原始字符串里不能出现反引号，否则 Go 源码会编译不过（这里顺带兜住）。
 	if strings.Contains(s, "`") {
 		t.Errorf("BridgeScript 含反引号")
+	}
+}
+
+// 桥接必须按「前缀 + /」解析相对引用。
+//
+// 若仍按 window.location.href 解析：文档 URL 是 /app/agent2api（无尾斜杠），
+// 裸相对引用 assets/providers/x.png 会解析成 /app/assets/providers/x.png，
+// 再补前缀就成了 /app/agent2api/app/assets/providers/x.png —— 双重前缀 404，
+// 正是「添加账号 → 反代」里模型图标全部不显示的成因。
+func TestBridgeScriptResolvesRelativeToPrefix(t *testing.T) {
+	s := BridgeScript(NewPrefix("/app/agent2api"))
+	if !strings.Contains(s, "var RESOLVE_BASE=") {
+		t.Fatalf("桥接缺少解析基准 RESOLVE_BASE: %s", s)
+	}
+	// 基准必须归一成绝对 URL，且落在前缀之下（new URL 的第二个参数必须是绝对 URL）。
+	if !strings.Contains(s, "new URL(P+'/',window.location.href)") {
+		t.Errorf("解析基准未按前缀归一化: %s", s)
+	}
+	// toGw 内部不得再拿 window.location.href 当基准（那会把相对路径解到上一级）。
+	start := strings.Index(s, "function toGw(v){")
+	if start < 0 {
+		t.Fatalf("未找到 toGw: %s", s)
+	}
+	body := s[start:]
+	end := strings.Index(body, "function str(url)")
+	if end < 0 {
+		t.Fatalf("未找到 str(): %s", body)
+	}
+	if strings.Contains(body[:end], "window.location.href") {
+		t.Errorf("toGw 仍以 window.location.href 为基准: %s", body[:end])
 	}
 }
 
@@ -376,6 +428,18 @@ func TestProxyHTMLRewriteAndInject(t *testing.T) {
 	}
 	if !strings.Contains(body, `data-fn-gateway-seed="1"`) || !strings.Contains(body, `data-fn-gateway-bridge="1"`) {
 		t.Errorf("未注入种子/桥接脚本: %s", body)
+	}
+	// <base> 是相对引用的兜底：必须注入，且必须排在两个脚本之前
+	// （浏览器要求 <base> 先于任何会解析 URL 的元素出现）。
+	baseAt := strings.Index(body, `<base href="/app/agent2api/">`)
+	seedAt := strings.Index(body, `data-fn-gateway-seed="1"`)
+	bridgeAt := strings.Index(body, `data-fn-gateway-bridge="1"`)
+	if baseAt < 0 {
+		t.Fatalf("未注入 <base> 标签: %s", body)
+	}
+	if !(baseAt < seedAt && seedAt < bridgeAt) {
+		t.Errorf("注入顺序应为 base < seed < bridge，实际 base@%d seed@%d bridge@%d",
+			baseAt, seedAt, bridgeAt)
 	}
 	if strings.Contains(body, "/app/agent2api/app/agent2api") {
 		t.Errorf("出现重复前缀: %s", body)

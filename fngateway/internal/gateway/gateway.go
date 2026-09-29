@@ -50,14 +50,24 @@ func NewPrefix(p string) Prefix {
 
 // Strip 剥除前缀，返回以 / 开头的内部路径。
 // safe 为 false 表示该路径本就不带前缀（调用方自行决定如何处理）。
+//
+// 循环剥除，保证幂等：万一请求被拦了两次（外层代理与内层代理都改写过，
+// 或调用方误用），/app/x/app/x/api 只剥一层会剩下 /app/x/api 回源，
+// 上游必然 404。这里一路剥到底。
 func (p Prefix) Strip(path string) (string, bool) {
-	if path == p.Path {
-		return "/", true
+	ok := false
+	for {
+		if path == p.Path {
+			return "/", true
+		}
+		if strings.HasPrefix(path, p.Path+"/") {
+			path = path[len(p.Path):]
+			ok = true
+			continue
+		}
+		break
 	}
-	if strings.HasPrefix(path, p.Path+"/") {
-		return path[len(p.Path):], true
-	}
-	return path, false
+	return path, ok
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +137,32 @@ func (p Prefix) RewriteHTML(body []byte) []byte {
 		return strings.TrimSuffix(m, ">") + ` crossorigin="use-credentials">`
 	})
 	return []byte(s)
+}
+
+// BaseTag 生成把文档基址钉在网关前缀下的 <base> 标签。
+//
+// 为什么必须有它：飞牛桌面入口的 url 是 /app/agent2api（**不带尾斜杠**），
+// 文档 URL 因此就是 https://host/app/agent2api。这时任何裸相对引用都会按
+// 「上一级目录」解析：
+//
+//	new URL('assets/providers/workbuddy.png', 'https://host/app/agent2api')
+//	  → https://host/app/assets/providers/workbuddy.png
+//
+// agent2api 这一段被吃掉了。表现就是「添加账号 → 反代」里的模型图标全部不显示
+// —— 图标（PROVIDER_ICONS / wbPresetProviders.iconOf）走的正是裸相对路径。
+//
+// 注入 <base href="{前缀}/"> 后，浏览器把文档基址固定成
+// https://host/app/agent2api/，裸相对引用重新落回前缀之下。
+//
+// 它只影响相对引用：以 / 开头的根绝对路径只借用 base 的 origin，路径部分不受
+// 影响，因此静态改写（RewriteHTML）与运行时桥接都不会被它打乱。
+// 与 fnos-logmanager（ServeIndexWithBase）、nas（injectPrefix）、
+// deepseek.harness（fnGatewayBridgeScript）三处的做法一致。
+func (p Prefix) BaseTag() string {
+	if p.Path == "" {
+		return ""
+	}
+	return `<base href="` + p.Path + `/">`
 }
 
 // InjectHead 把片段插入 HTML 的 <head> 之后。
@@ -319,9 +355,14 @@ func NewProxy(opt Options) (http.Handler, error) {
 				return err
 			}
 			body = opt.Prefix.RewriteHTML(body)
+			// 注入顺序有讲究：<base> 必须最靠前（浏览器要求它先于任何会解析
+			// URL 的元素出现），种子脚本其次（要抢在 Web 壳读 localStorage
+			// 之前），桥接脚本最后。三者合成一个片段一次插入。
+			snippet := opt.Prefix.BaseTag()
 			if opt.Bridge != nil {
-				body = InjectHead(body, opt.Bridge())
+				snippet += opt.Bridge()
 			}
+			body = InjectHead(body, snippet)
 			resp.Body = io.NopCloser(strings.NewReader(string(body)))
 			resp.ContentLength = int64(len(body))
 			resp.Header.Set("Content-Length", fmt.Sprint(len(body)))

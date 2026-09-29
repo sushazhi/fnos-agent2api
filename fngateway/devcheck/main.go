@@ -80,6 +80,11 @@ func main() {
 		log.Fatalf("监听 %s 失败: %v", *addr, err)
 	}
 	log.Printf("面板: http://%s%s/", *addr, prefixObj.Path)
+	// 注意上面这条链接**带尾斜杠**。飞牛桌面入口的 url 是 /app/agent2api（不带
+	// 尾斜杠），两者对裸相对引用的解析结果不同：带斜杠时 assets/providers/x.png
+	// 落在前缀下（正常），不带斜杠时会退到上一级 /app/assets/... 而 404。
+	// 要复现「添加账号里模型图标不显示」，请手动去掉地址栏末尾的斜杠再回车。
+	log.Printf("复现图标 404：把上面地址末尾的 / 去掉（模拟飞牛桌面入口的 url 形态）")
 	log.Printf("上游: http://%s", *upstream)
 	if err := http.Serve(ln, chain); err != nil {
 		log.Fatalf("服务退出: %v", err)

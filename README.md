@@ -78,9 +78,40 @@ OpenAI SDK ──http──> http://<飞牛IP>:3065/v1 ────────�
   `Location` 补回前缀；把 `Set-Cookie` 的 `Path` 从 `/` 收窄到
   `/app/agent2api/`（子路径迁移），否则 Cookie 越界且会被同域其它应用覆盖。
 - **写方向**：HTML 里 `src` / `href` / `action` / `poster` 的**裸相对路径**
-  改写成带前缀；紧随 `<head>` 之后注入两段脚本 —— 一段把面板要的密钥种进
-  `localStorage['agent2api.webKey']`，一段补 `fetch`/XHR/`WebSocket` 等
-  运行时 API 的前缀。
+  改写成带前缀；紧随 `<head>` 之后注入 `<base href="/app/agent2api/">` 与两段
+  脚本 —— 一段把面板要的密钥种进 `localStorage['agent2api.webKey']`，一段补
+  `fetch`/XHR/`WebSocket` 等运行时 API 的前缀。
+
+**为什么还要 `<base>`（这一条是踩出来的）。** 桌面入口的 `url` 是
+`/app/agent2api`，**不带尾斜杠**，于是文档 URL 就是
+`https://host/app/agent2api`。这种文档 URL 下，任何**裸相对引用**都会被浏览器
+按「上一级目录」解析：
+
+```
+new URL('assets/providers/workbuddy.png', 'https://host/app/agent2api')
+  → https://host/app/assets/providers/workbuddy.png     ← agent2api 这一段被吃掉了
+```
+
+`RewriteHTML` 只改写**静态 HTML 里**的引用，救不了这些引用 —— 它们全部是运行期
+由面板 JS 拼出来的：`preset-providers.js` 的 `iconOf()` 返回
+`assets/providers/<file>.png`，反代列表的图标则编译在 `islands/ui.js` 的
+`PROVIDER_ICONS` 里。表现就是**「添加账号 → 反代」里各个模型的图标全部不显示**
+（只剩首字母兜底徽章）。
+
+修法是双保险，两处都在 `fngateway` 内、不碰上游产物：
+
+1. 响应里注入 `<base href="{前缀}/">`，把文档基址钉回前缀之下 ——
+   与 `fnos-logmanager`（`ServeIndexWithBase`）、`nas`（`injectPrefix`）、
+   `deepseek.harness`（`fnGatewayBridgeScript`）四处做法一致。
+2. 桥接脚本解析相对引用时用 `P + '/'` 作基准（`RESOLVE_BASE`），
+   而不是 `window.location.href`。**这一步不是可有可无的防御**：加了 `<base>`
+   之后浏览器已经能正确解析裸相对引用，但桥接脚本仍会把这个 URL 按无斜杠的
+   文档 URL 解析、再补一次前缀，亲手把它改成 `/app/agent2api/app/assets/...`
+   的双重前缀 404。两者必须一起改。
+
+> 这个缺陷在本地 `devcheck` 里**看不出来**：`devcheck` 打印的地址带尾斜杠
+> （`…/app/agent2api/`），带斜杠的文档 URL 解析是正常的。只有模拟飞牛桌面入口
+> 那种不带斜杠的地址才会复现。`devcheck` 现在会把这一点打在日志里。
 
 之所以说 agent2api 比 cli2api 省事：上游面板**没有客户端路由**（全仓库
 `ui/` 下 `location.pathname` / `pushState` / `basename` 出现 0 次，翻页是内存里
@@ -123,7 +154,7 @@ fnos-agent2api/
 │   │   ├── gateway.go          # 前缀剥离/回填、HTML 改写、Cookie Path 改写
 │   │   ├── bridge.go           # 注入面板的 seed + 运行时 API 补丁脚本
 │   │   └── gate.go             # 管理员闸门
-│   └── *_test.go               # 34 个测试
+│   └── *_test.go               # 37 个测试
 ├── app/ui/                     # 上游 WebUI（71 文件）+ config + images/
 ├── tools/                      # 本地开发辅助脚本（不参与打包）
 │   ├── make_icons.py           # 从一张主图生成四个图标文件
@@ -223,6 +254,7 @@ commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件�
 | `check_text_hygiene` | CRLF 破坏 `cmd/*` 的 shebang；BOM 让 fnpack 解析出带 `\ufeff` 的键名而静默失配 |
 | `check_manifest_values` | fnpack 把 manifest 取值里的 `;` 当终止符，之后内容**静默丢弃** |
 | `verify_icons` | 图标缺失/尺寸错 → 桌面图标空白 |
+| `check_webui`（图标） | `ui/assets/providers/*.png` 缺失或索引引用的图标不存在 →「添加账号」里模型图标空白。**两个索引写法不同**（反代在 `islands/ui.js` 里写完整路径 `assets/providers/x.png`；预置在 `preset-providers.js` 里只写 `icon: 'x.png'`，由 `iconOf()` 运行期拼目录），故配了两条正则 —— 实测只配一条时 20 个预置图标会全部漏检 |
 | `check_webui` | 上游 WebUI 缺文件（面板白屏）或资源引用变成根绝对路径（改写失效） |
 | `verify_webui_provenance` | 面板形态漂移（上游改了 HTML/localStorage 键/fetch 形态） |
 | `verify_upstream_version` | tag 被移动 / 镜像给了旧包 → 版本号对不上 |
@@ -231,7 +263,7 @@ commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件�
 | CI `Verify binaries` | 二进制架构不符、glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 3 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
 
-`fngateway` 自身还有 34 个 Go 测试：
+`fngateway` 自身还有 37 个 Go 测试：
 
 ```powershell
 cd fngateway; go vet ./...; go test ./...
@@ -432,6 +464,16 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
 
 - `fngateway`：`go vet` 干净，`go test ./...` 34 个测试全过
   （含 HTML 改写、Cookie Path 改写、密钥生成与复用、前缀剥离/回填）
+  —— 后续修「模型图标不显示」时新增 3 个测试（`TestBaseTag`、
+  `TestBridgeScriptResolvesRelativeToPrefix`，以及
+  `TestProxyHTMLRewriteAndInject` 里新增的 `<base>` 注入顺序断言），
+  当前共 **37 个，全部通过**（`go vet` 亦干净）
+- 图标守卫做了正反两向验证：正常树上报「磁盘 30 个，被引用 30 个，缺失 0 个」；
+  把 `openai.png` 临时改名后，`--check` 如期以 exit 1 失败并点名该文件
+- 根因用 Node 实测复现（无尾斜杠文档 URL）：
+  `new URL('assets/providers/openai.png','http://host/app/agent2api')`
+  → `http://host/app/assets/providers/openai.png`（`agent2api` 段被吃掉），
+  加尾斜杠后才落到 `.../app/agent2api/assets/providers/openai.png`
 - 上游 WebUI 溯源哈希与上游 tag 逐字节一致（`5ecf43c0…`，71 个文件）
 - 打包管线端到端跑通：组装 → `fnpack build` → 解包自检，amd64 与 arm64
   两个包均通过；随后用 `tools/inspect_fpk.py` 独立复核了包内 ELF 架构、
@@ -454,6 +496,13 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
 - ⚠️ **真机安装**。以上全部是构建期结论，**尚未在真实飞牛设备上跑起来**。
   待验证项：socket 路径与权限、`X-Trim-*` 管理员闸门、面板经网关后的渲染与
   交互、下游 `:3065/v1` 的局域网可达性。
+  —— 「添加账号 → 反代」模型图标的修复已在本机通过 `go test`（37 个）与
+  `python build.py --check`，但**图标在真机上是否真的显示出来，仍需实机确认**；
+  这是该 bug 的最终验收。
+- ⚠️ **上游升级后需回归**：图标守卫依赖 `preset-providers.js` 的
+  `icon: 'x.png'` 写法与 `islands/ui.js` 的完整路径字面量。上游若改写法，
+  两条正则可能同时失效 —— 已加「解析出的图标数不得少于磁盘数一半」的兜底断言
+  把它变成构建期失败，但升级上游时仍应人工看一眼日志里的图标计数。
 - 真机首次安装曾暴露过一次 `exit status 1`：当时 `.local-build/bin/` 里放的是
   Go 占位程序（1.5 MB、静态、**能通过全部 glibc/架构检查**），不是真 Rust
   二进制。现已加两道断言（`rustc` 指纹 + 体积下限）拦住这类替身。

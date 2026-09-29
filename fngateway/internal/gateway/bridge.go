@@ -93,11 +93,22 @@ func jsString(s string) string {
 const bridgeBody = `
 function safe(fn){try{return fn()}catch(e){return null}}
 function already(p){return p===P||p.indexOf(P+'/')===0}
+/* 解析基准必须显式带上尾斜杠。
+   飞牛桌面入口的 url 是 /app/agent2api（不带尾斜杠），文档 URL 就是
+   https://host/app/agent2api。此时把裸相对引用（assets/providers/x.png）
+   按 window.location.href 解析会退到上一级 /app/assets/...，再补前缀就变成
+   /app/agent2api/app/assets/...，必然 404 —— 这正是「添加账号 → 反代」里
+   模型图标全部不显示的原因。
+   用 P+'/' 作基准后，裸相对引用解析结果天然落在前缀之下，already() 判定为
+   「已带前缀」直接放行，由浏览器按 <base> 自行解析，桥接不再插手改坏它。
+   new URL 的第二个参数必须是**绝对** URL，所以这里用 P+'/' 相对当前文档
+   求一次绝对值；万一环境异常求不出来，退回原来的 href（行为不劣于改前）。 */
+var RESOLVE_BASE=safe(function(){return new URL(P+'/',window.location.href).toString()})||window.location.href;
 function toGw(v){
   if(v===null||v===undefined||v==='')return null;
   var str=String(v).trim();
   if(/^(blob:|data:|javascript:|about:|#)/i.test(str))return null;
-  var u; try{u=new URL(str,window.location.href)}catch(e){return null}
+  var u; try{u=new URL(str,RESOLVE_BASE)}catch(e){return null}
   if(!/^(https?|wss?):$/.test(u.protocol))return null;
   if(u.origin!==window.location.origin)return null;
   if(already(u.pathname))return null;
@@ -188,7 +199,7 @@ if(window.WebSocket){
   var _W=window.WebSocket;
   var W=function(url,protocols){
     var fixed=safe(function(){
-      var u=new URL(String(url),window.location.href);
+      var u=new URL(String(url),RESOLVE_BASE);
       var wp=(window.location.protocol==='https:'?'wss:':'ws:');
       if(u.protocol!==wp)return null;
       if(u.hostname!==window.location.hostname)return null;
