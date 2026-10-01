@@ -97,7 +97,14 @@ def upstream_versions(token=None):
     """
     found = set()
     for page in (1, 2):
-        tags = api_get(f"repos/{build.UPSTREAM_REPO}/tags?per_page=100&page={page}", token)
+        try:
+            tags = api_get(f"repos/{build.UPSTREAM_REPO}/tags?per_page=100&page={page}", token)
+        except Exception as e:
+            # 限流 / 网络抖动：不要抛原始 traceback，交给文件末尾那句
+            # 「未能从上游取到任何版本号」统一报错 —— 结果一样是失败退出，
+            # 但人能一眼看懂原因（在 Actions 日志里尤其重要）。
+            log(f"  [提示] 读取上游 tags 第 {page} 页失败: {e}")
+            break
         if not isinstance(tags, list) or not tags:
             break
         for t in tags:
@@ -288,7 +295,14 @@ def main():
     if cur is None:
         raise SystemExit(f"ERROR: build.py 的 UPSTREAM_VERSION 无法解析: {build.UPSTREAM_VERSION!r}")
 
-    latest = parse_ver(want) if want else max(upstream_versions(token))
+    try:
+        latest = parse_ver(want) if want else max(upstream_versions(token))
+    except Exception as e:
+        # 取不到上游版本就是「这次检查失败」，但不能让它以 traceback 收场：
+        # Actions 日志里一个 traceback 会被当成脚本 bug，而真实原因通常是
+        # API 限流（匿名 60 次/小时）或网络。job 照样非零退出（fail 是正确
+        # 的 —— 绝不能在「不知道上游有没有新版」时判定「无更新」并静默跳过）。
+        raise SystemExit(f"ERROR: 无法确定上游最新版本，本次检查失败: {e}")
     log(f" 上游最新: {ver_str(latest)}")
 
     newer = latest > cur
