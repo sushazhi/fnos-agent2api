@@ -24,13 +24,23 @@ name: Build and Release Agent2API for fnOS
 # package job 不产二进制，跑在 ubuntu-24.04 上无所谓。
 #
 # ── 触发方式 ──────────────────────────────────────────────────
-#   · workflow_dispatch：手动触发，产物作为 artifact 下载，不发布 Release
 #   · push tag v*：构建 + 发布 Release（含 fpk 与 SHA256SUMS.txt）
+#   · workflow_dispatch（ref=tag）：与上面等价，由 check-upstream.yml 派发。
+#     **自动升级走的就是这条路**：定时检查发现上游新版 → 改 pin/manifest →
+#     提交 main → 打 tag → 派发本 workflow。之所以要「派发」而不是直接
+#     push tag 让它自动触发，是因为用 GITHUB_TOKEN 推的 tag 不会触发其它
+#     workflow（GitHub 防递归规则），只有 workflow_dispatch /
+#     repository_dispatch 两个事件例外。详见 check-upstream.yml 的文件头。
+#   · workflow_dispatch（ref=分支）：只构建，产物作为 artifact 下载，
+#     不发布 Release（github.ref 不是 refs/tags/*，Release 步骤自动跳过）。
+#     要在此情况下也发布，勾 force_release。
 #   · pull_request：只构建，不发布
 #
 # ── 发布用的凭据 ──────────────────────────────────────────────
 # 用 Actions 内置的 secrets.GITHUB_TOKEN，不需要额外配 PAT —— 顶层
 # permissions: contents: write 已经给它 Release 写权限。
+# 也正因为用的是内置 token，本 workflow 不能靠 push tag 触发，只能被派发
+# 或手动触发（见上）。
 
 on:
   push:
@@ -38,6 +48,14 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      # 网页手动触发时 ref 只能选分支或 tag。选分支时 github.ref 不是
+      # refs/tags/*，下面「Create Release」默认跳过 —— 这个开关用来在分支上
+      # 也发一版（tag 名取 manifest 里的版本号，不存在则自动创建）。
+      force_release:
+        description: '即使在分支上也创建 Release（tag 用 manifest 里的版本号）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -344,15 +362,39 @@ jobs:
           EOF
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.force_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
         run: |
-          TAG="${{ github.ref_name }}"
+          set -euo pipefail
+
+          # 常态（tag 触发 / 被 check-upstream 以 ref=tag 派发）：用触发的 tag。
+          # force_release（手动在分支上跑）：github.ref 不是 tag，此时用 manifest
+          # 里的版本号现造一个 tag，否则 Release 没有可依附的 ref。
+          if [ "${FORCE_RELEASE:-false}" = "true" ] \
+             && ! printf '%s' "${GITHUB_REF}" | grep -q '^refs/tags/v'; then
+            TAG="v${APP_VERSION}"
+            echo "force_release=true 且当前 ref 是分支 —— 目标 tag: ${TAG}"
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "tag ${TAG} 已存在，直接复用"
+            else
+              git tag "${TAG}"
+              git push origin "refs/tags/${TAG}"
+              echo "已创建并推送 tag ${TAG}"
+            fi
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
           CHANGELOG=$(grep '^changelog[[:space:]]*=' manifest | sed 's/^changelog[[:space:]]*=[[:space:]]*//' | sed 's/<br>/\n/g')
           NOTES="${CHANGELOG}\n\n---\n**SHA256 (amd64):** \`${PACKAGE_SHA256}\`"
 
           # 重打同一个版本标签时是替换而不是失败：若同名 Release 已存在则先删除
           # （保留 tag 本身），否则 gh 会报 "release already exists" 导致
           # 「包已构建成功但发布失败」，留下 tag 与 Release 不一致的状态。
+          # 这条对 check-upstream 的「自愈补发」也很关键：补发时 tag 已在，
+          # 只有 Release 缺失或被删过，删除分支会跳过、创建分支会补上。
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — deleting it before recreating"
             gh release delete "$TAG" --yes
@@ -363,5 +405,3 @@ jobs:
             SHA256SUMS.txt \
             --title "$TAG" \
             --notes "$(echo -e "$NOTES")"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -135,6 +135,7 @@ fnos-agent2api/
 ├── LICENSE.upstream            # 上游 agent2api 的完整许可（随仓库提交，要进包）
 ├── ICON.PNG / ICON_256.PNG     # 桌面图标（64 / 256）
 ├── .github/workflows/
+│   ├── check-upstream.yml      # 每周一查上游；有新版就改 pin+manifest 并派发构建
 │   └── build-and-release.yml   # 编二进制 + 出 fpk + 发 Release
 ├── config/
 │   ├── privilege               # run-as=package, username/groupname=agent2api
@@ -159,8 +160,9 @@ fnos-agent2api/
 ├── tools/                      # 本地开发辅助脚本（不参与打包）
 │   ├── make_icons.py           # 从一张主图生成四个图标文件
 │   ├── ui_hash.py              # 算/核对上游 WebUI 树哈希
+│   ├── bump_upstream.py        # 查上游新版本 → 改四处 pin + manifest（CI 定时用）
 │   ├── inspect_fpk.py          # 独立复核生成的 fpk（与 build.py 不同的代码路径）
-│   ├── check_workflow.py       # 静态校验 CI workflow（needs/runs-on/版本读取）
+│   ├── check_workflow.py       # 静态校验 CI workflow（needs/runs-on/artifact/cron/语法）
 │   └── check_text.py           # 编码/换行/可执行位检查
 └── .local-build/               # 中间产物（gitignore）
     ├── bin/                    # 放 CI 产出的 4 个 Linux 二进制
@@ -206,16 +208,42 @@ python build.py --version 2.9.0-2   # 覆盖版本号
 # 维护：拉上游 tag 源码，把 desktop-tauri/ui 同步进 app/ui 并核对溯源
 python build.py --sync-upstream
 python build.py --sync-upstream --force-upstream   # 忽略缓存重下
+
+# 维护：查上游新版本并改齐 pin/manifest（CI 定时跑的同一个脚本，见 §3.5）
+python tools\bump_upstream.py --detect             # 只看，不改文件
+python tools\bump_upstream.py --apply              # 有新版就改到位
 ```
 
 `--sync-upstream` 只做「刷新 app/ui 并核对」，不继续打包 —— 它是个独立维护
 步骤，改完的 `app/ui` 要提交进仓库，这样离线打包也能出完整包。
 
-### 3.3 CI 构建（推荐）
+### 3.3 CI 构建
 
-推 `v*` tag 触发 [`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml)：
-先编 Linux 二进制，再打包并发布 Release（含两个 fpk 与 `SHA256SUMS.txt`）。
-也可以 `workflow_dispatch` 手动跑，产物走 artifact、不发 Release。
+两条 workflow，分工明确：
+
+| workflow | 触发 | 干什么 |
+| --- | --- | --- |
+| [`check-upstream.yml`](.github/workflows/check-upstream.yml) | 每周一 03:23 UTC 定时（也可手动） | 查上游有没有新版；有就改 pin+manifest、提交 `main`、打 tag、派发构建 |
+| [`build-and-release.yml`](.github/workflows/build-and-release.yml) | `v*` tag / 被派发 / 手动 | 编 Linux 二进制 → 出 fpk → 发 Release（含 `SHA256SUMS.txt`） |
+
+**自动升级（默认路径）**：上游发新版后，最迟一周（下个周一），`check-upstream.yml` 会
+自动走完「改四处 pin → 同步面板 → 提交 → 打 tag → 构建 → 发 Release」。
+平时无事发生时它只是一次几秒的空转，不会重复发版（幂等：提交后 pin 已等于
+上游最新版，下次判定「无更新」直接跳过）。
+
+**为什么是「派发」而不是「push tag 自动触发」**：GitHub 有一条防递归规则 ——
+用内置 `GITHUB_TOKEN` 推的 tag **不会触发**其它 workflow 运行，只有
+`workflow_dispatch` / `repository_dispatch` 两个事件例外。所以如果让定时任务
+去 push tag 等构建自己开跑，tag 会推上去但构建永远不开始；而那时 pin 已经
+提交进 `main`，下次检查会判定「无更新」，这个版本就**永远不会有 Release**。
+改成显式 `gh workflow run --ref <tag>` 派发，构建逻辑仍然只有一份。
+
+**手动跑 `build-and-release.yml`**：
+
+- `ref` 选 **tag** → 构建 + 发 Release（等价于 tag 触发）
+- `ref` 选 **分支** → 只构建，产物走 artifact，不发 Release；
+  勾上 `force_release` 才会发（tag 名取 `manifest` 里的版本号，不存在则自动创建）
+- 重发某个版本：`ref` 填对应 tag 即可（同名 Release 会被替换，不会报 already exists）
 
 **runner 为什么是 `ubuntu-22.04` 而不是 `ubuntu-24.04`** —— glibc 兼容性：
 
@@ -227,7 +255,8 @@ python build.py --sync-upstream --force-upstream   # 忽略缓存重下
 二进制在哪个 glibc 上编，就要求目标机 glibc ≥ 那个版本。飞牛 fnOS 1.2.x 基于
 Debian 12 (bookworm) = glibc 2.36。这个坑**不会在构建期报错，只在真机启动时
 炸**，所以 workflow 里有一道 `readelf`/`objdump` 断言，把「runner 镜像悄悄
-升级」这种漂移变成构建期硬失败。
+升级」这种漂移变成构建期硬失败。（`check-upstream.yml` 只跑 Python 与 git，
+不产二进制，所以没有这个约束，跑在 `ubuntu-24.04` 上无所谓。）
 
 编出来的二进制要落到 `.local-build/bin/` 才能打包，命名固定：
 
@@ -262,6 +291,7 @@ commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件�
 | `check_binaries` | 二进制缺失、不是 ELF、架构不符 |
 | CI `Verify binaries` | 二进制架构不符、glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 3 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
+| `check_workflow.py` | workflow 静态错误：`needs` 指向不存在的 job、缺 `runs-on`、引用不存在的脚本、下载了本 workflow 没上传的 artifact、非法 cron、未声明的 `inputs.X`、`uses` 缺版本号或跨文件版本不一致、`bash -n` 语法错误、派发目标不可手动触发 |
 
 `fngateway` 自身还有 37 个 Go 测试：
 
@@ -288,10 +318,39 @@ python tools\make_icons.py 主图.png
 它会按中心方形裁剪 + LANCZOS 缩放，写出 `ICON.PNG`、`ICON_256.PNG`、
 `app/ui/images/icon_64.png`、`app/ui/images/icon_256.png` 四个文件。
 
-**升级上游**：改 `build.py` 顶部的 `UPSTREAM_VERSION` / `UPSTREAM_TAG`，
-跑 `python build.py --sync-upstream`。若上游改了面板，`verify_webui_provenance`
-会失败并打印新旧哈希 —— 人工确认改写逻辑仍然成立后，把新哈希写回
-`UPSTREAM_UI_SHA256`。
+**升级上游**：正常情况下**不用手动做** —— `check-upstream.yml` 每周一自动查、
+自动改、自动发包（见 §3.3）。需要立刻升级或想先在本地看一眼时：
+
+```powershell
+# 只看上游有没有新版，不改任何文件（只读，安全）
+python tools\bump_upstream.py --detect
+
+# 有新版就改到位：build.py 的两处 pin + manifest 的 version/changelog
+python tools\bump_upstream.py --apply
+
+# 上游已是最新时也重打一次当前版本（验证流水线用）
+python tools\bump_upstream.py --apply --force
+
+# 指定版本（比如上游最新是 2.10.0，想先跳到 2.9.5 验证）
+python tools\bump_upstream.py --apply --upstream-version 2.9.5
+```
+
+脚本会**一次性改齐四处耦合值**，漏改任何一处都会让 `build.py` 硬失败：
+
+| 位置 | 内容 |
+| --- | --- |
+| `build.py` `UPSTREAM_VERSION` | 驱动 `UPSTREAM_TAG` 与下载 URL |
+| `build.py` `UPSTREAM_UI_SHA256` | 面板树哈希（含注释里的文件数） |
+| `manifest` `version` | 格式 `x.y.z-N` |
+| `manifest` `changelog` | 追加条目（保留最近 4 条） |
+
+改完还会自己跑一遍不需要二进制的构建期守卫（卫生/图标/面板/契约），
+不过就非零退出、不留半成品。若上游改了面板，`sync_webui` 会把新面板写进
+`app/ui`，树哈希随之变化 —— 这一步是自动的，不再需要人工抄哈希。
+
+> 只跑 `python build.py --sync-upstream` 仍然可用：它只做「刷新 `app/ui`
+> 并核对溯源」，不碰 pin 和 manifest。改完的 `app/ui` 要提交进仓库，
+> 这样离线打包也能出完整包。
 
 ---
 
@@ -480,6 +539,16 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
   `cmd/*` 权限、`ui/config` 内容与 `UPSTREAM.txt` 文案
 - 各构建期守卫逐个做负例注入（篡改面板字节 / 写错前缀 / manifest 塞分号 /
   删图标 / 抽掉二进制），均如期硬失败
+- 自动升级脚本 `tools/bump_upstream.py` 端到端验证：`--detect` 只读、不改文件；
+  `--apply` 六个步骤全过（改 pin → 同步面板 → 重算树哈希 → 溯源复核 → 改
+  manifest → 跑守卫），改完的 `manifest` 差异精确到只有 `version` 与
+  `changelog` 两处，`build.py` 与 `app/ui` 逐字节未变；`--apply --force`
+  在上游无新版时正确跳过 changelog 追加（不产生重复条目）
+- workflow 静态检查 `tools/check_workflow.py` 做了 12 项负例注入
+  （派发不存在的 workflow / 派发目标不可手动触发 / 未声明的 `inputs.X` /
+  非法 cron / 引用不存在的脚本 / 下载未上传的 artifact / 关键 artifact 缺失 /
+  `uses` 缺版本号 / 跨文件版本不一致），全部如期检出；两个 workflow 里
+  20 个 `run` 块通过 `bash -n` 语法检查
 
 **已通过 CI 验证**（GitHub Actions，`ubuntu-22.04` 编 / `ubuntu-24.04` 打包）：
 
@@ -493,6 +562,13 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
 
 **尚未验证**：
 
+- ⚠️ **自动升级链路的首次真实运行**。`check-upstream.yml` 的每一步都在本地
+  验证过（脚本 `--detect`/`--apply`/`--force` 三种模式、workflow 静态检查、
+  shell 语法、`gh workflow run` 的目标可派发），但**「定时触发 → 提交 →
+  打 tag → 派发 → 构建 → 发 Release」这条完整链路还没有被上游真实的新版本
+  跑通过** —— 需要等上游发一次新版才能确认。已知的、无法在本地验证的点：
+  Actions 对 `secrets.GITHUB_TOKEN` 的 `actions: write` 授权是否允许
+  `gh workflow run`（若被拒，退路是改用 `repository_dispatch` + 一个 PAT）。
 - ⚠️ **真机安装**。以上全部是构建期结论，**尚未在真实飞牛设备上跑起来**。
   待验证项：socket 路径与权限、`X-Trim-*` 管理员闸门、面板经网关后的渲染与
   交互、下游 `:3065/v1` 的局域网可达性。
@@ -503,6 +579,9 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
   `icon: 'x.png'` 写法与 `islands/ui.js` 的完整路径字面量。上游若改写法，
   两条正则可能同时失效 —— 已加「解析出的图标数不得少于磁盘数一半」的兜底断言
   把它变成构建期失败，但升级上游时仍应人工看一眼日志里的图标计数。
+  **自动化把这件事的风险放大了**：以前升级是人手动跑的，会顺带看一眼日志；
+  现在没人看了。兜底断言能把「漏检」变成「构建失败」，但断言本身失效
+  （两条正则同时不匹配任何图标）时仍会静默通过 —— 这是已知的残余风险。
 - 真机首次安装曾暴露过一次 `exit status 1`：当时 `.local-build/bin/` 里放的是
   Go 占位程序（1.5 MB、静态、**能通过全部 glibc/架构检查**），不是真 Rust
   二进制。现已加两道断言（`rustc` 指纹 + 体积下限）拦住这类替身。
