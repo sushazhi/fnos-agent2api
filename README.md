@@ -342,7 +342,7 @@ python tools\bump_upstream.py --apply --upstream-version 2.9.5
 | `build.py` `UPSTREAM_VERSION` | 驱动 `UPSTREAM_TAG` 与下载 URL |
 | `build.py` `UPSTREAM_UI_SHA256` | 面板树哈希（含注释里的文件数） |
 | `manifest` `version` | 格式 `x.y.z-N` |
-| `manifest` `changelog` | 追加条目（保留最近 4 条） |
+| `manifest` `changelog` | 覆盖为最新一版（只留本版说明，不累加旧条目） |
 
 改完还会自己跑一遍不需要二进制的构建期守卫（卫生/图标/面板/契约），
 不过就非零退出、不留半成品。若上游改了面板，`sync_webui` 会把新面板写进

@@ -51,12 +51,18 @@ import build  # noqa: E402  （要放在 sys.path 调整之后）
 # 自动流水线只跟正式版本，预发布版本要不要跟由人决定。
 VER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
-# changelog 最多保留几条版本条目。上游发版极快，不封顶的话 manifest 会一直
-# 长下去（desc 与 changelog 都会进包内 manifest，也都会显示在应用中心里）。
-MAX_CHANGELOG_ENTRIES = 4
+# changelog 只保留**最新一版**的说明。上游发版极快，早先的做法是每版往旧条目
+# 前面插一条、最多留 4 条，但 manifest 仍会一直长下去（desc 与 changelog 都会
+# 进包内 manifest，也都会显示在应用中心里），而应用中心只关心「这一版更新了
+# 什么」。所以现在 bump 时**整体覆盖** changelog，不在旧条目上累加；旧版本的
+# 说明留在各版本的 GitHub Release 里即可，不在 manifest 里堆。
+#
+# 注意：这只在「确实有新版本」时发生（版本号变了）。`--force` 且版本未变时
+# 早退、不动 changelog，所以重打包不会把说明改写成通用模板。
 
-# changelog 里分隔两个版本条目的写法（见现网 manifest：`…失败<br><br>v2.9.0-1<br>…`）。
+# changelog 里分隔两个版本条目的写法（见历史 manifest：`…失败<br><br>v2.9.0-1<br>…`）。
 # 只在 `<br><br>` 后面紧跟版本号时才切分，避免把条目内部的段落分隔也当成边界。
+# 现在不再保留旧条目，只用来数出「覆盖前有几条」以便日志说明。
 ENTRY_SPLIT_RE = re.compile(r"<br><br>(?=v\d+\.\d+\.\d+)")
 
 
@@ -217,6 +223,8 @@ def bump_manifest(upstream_tag, app_version):
 
     版本号已经是目标值时**不动 changelog** —— 这样 `--force` 就是纯粹的
     「按当前版本重打一次包」，不会每次重跑都往 changelog 里塞重复条目。
+
+    changelog **只保留最新一版**：有新版本时整段覆盖，不再把旧条目累加在后面。
     """
     text = read_manifest()
     cur = manifest_version(text)
@@ -235,13 +243,13 @@ def bump_manifest(upstream_tag, app_version):
     m = re.search(r"(?m)^changelog\s*=\s*(.*)$", text)
     if not m:
         raise RuntimeError("manifest 里读不到 changelog")
-    entries = [e for e in ENTRY_SPLIT_RE.split(m.group(1)) if e.strip()]
-    value = "<br><br>".join([new_entry] + entries[: MAX_CHANGELOG_ENTRIES - 1])
+    # 只统计旧条目数用于日志；旧条目一律丢弃（changelog 只保留最新一版）。
+    old_entries = [e for e in ENTRY_SPLIT_RE.split(m.group(1)) if e.strip()]
 
     text = set_manifest_key(text, "version", app_version)
-    text = set_manifest_key(text, "changelog", value)
-    log(f"  manifest: version {cur} -> {app_version}，changelog 追加条目"
-        f"（保留 {min(len(entries) + 1, MAX_CHANGELOG_ENTRIES)} 条）")
+    text = set_manifest_key(text, "changelog", new_entry)
+    log(f"  manifest: version {cur} -> {app_version}，changelog 覆盖为最新一版"
+        f"（丢弃旧条目 {max(len(old_entries) - 1, 0)} 条）")
     return text, True
 
 

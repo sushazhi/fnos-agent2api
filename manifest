@@ -29,4 +29,4 @@ desktop_uidir         = ui
 desktop_applaunchname = agent2api.Application
 
 # 更新日志
-changelog             = v2.9.0-2<br>修复「添加账号」里模型图标不显示：桌面入口 url 不带尾斜杠时，面板图标的裸相对路径会被解析到上一级；现注入 base 标签并修正桥接脚本的解析基准（不再产生双重前缀 404）<br>新增构建期守卫：模型图标缺失不再静默，构建即失败<br><br>v2.9.0-1<br>1.上游 agent2api v2.9.0 原样集成（零源码改动），外套飞牛网关适配层（fngateway）<br>2.统一网关接入：面板走 /app/agent2api，仅管理员可访问；网关密钥由后端注入，面板免密登录<br>3.下游独立端口 3065：标准 OpenAI 兼容接口，任意 OpenAI SDK 直连<br>4.单文件静态二进制：不依赖 Docker、不依赖 Node.js 运行时，SQLite 静态链接<br>5.内置 7 个提供商适配（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline Free / Cline Pass）<br>6.控制台自带更新入口在飞牛上不可用（无宿主机 updater），属预期降级
+changelog             = v2.9.0-2<br>修复「添加账号」里模型图标不显示：桌面入口 url 不带尾斜杠时，面板图标的裸相对路径会被解析到上一级；现注入 base 标签并修正桥接脚本的解析基准（不再产生双重前缀 404）<br>新增构建期守卫：模型图标缺失不再静默，构建即失败
