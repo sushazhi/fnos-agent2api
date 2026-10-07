@@ -288,6 +288,72 @@
 .field-row.stack > label { color: var(--text-2); font-size: 12.5px; }
 .field-row.stack textarea { width: 100%; min-height: 0; font-family: var(--font-mono); font-size: 11.5px; }
 
+/* ─── 添加账号弹窗：手机验证码登录（Loomy / AutoClaw 国内版）───
+   三行收完：手机号 + 内嵌发码按钮 / 验证码 + 备注名 / 提交 + 提示。
+   标签列沿用上面 .add-field 的口径（88px、右对齐、必填标星），控件的左边缘落在
+   同一条竖线上；差别只在这一段要在一行里放两个字段（.sms-pair）。
+
+   ── 为什么不用 .field-row（改造前就是它）──────────────────
+   .field-row 是「标签自然宽 + 控件吃剩余」的一行，写法本身没错，但组件库的 Input
+   带 w-full，flex-basis 取到 100% 就独占一行，flex-wrap 再把后面的按钮顶下去 ——
+   标签、输入框、按钮竖着排三层，六行里有五行是这么来的。这里换成定宽标签列的
+   网格，一行一件事。 */
+.sms-form { display: flex; flex-direction: column; gap: 12px; }
+.sms-field {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+.sms-field > .lb {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+/* 必填只标一枚星号：两个字段的标签字数不同，再带「（必填）」会右对齐不齐 */
+.sms-field > .lb .req,
+.sms-pair .lb-inline .req { color: var(--danger); font-style: normal; font-weight: 700; }
+
+/* 一行两个短字段：6 位验证码 + 备注名。两者都是三字标签，凑一行正好把宽度用掉 */
+.sms-pair { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.sms-pair > .lb-inline {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+/* 子选择器不是为了好看：components.css 的 `input[type="text"] { flex: 1 1 auto }`
+   是 (0,1,1)，单写 .sms-code 是 (0,1,0)，压不过它 —— 那样验证码会被拉满整行。
+   等宽字是为了 6 个数字逐位对齐，瞟一眼就知道填了几位。 */
+.sms-pair > .sms-code {
+  flex: 0 0 118px;
+  width: 118px;
+  font-family: var(--font-mono);
+  letter-spacing: .06em;
+}
+.sms-pair > .sms-name { flex: 1 1 0; width: auto; min-width: 0; }
+
+/* 收尾行：主按钮与提示都落在控件列上（左边缘与上面几行的输入框对齐），
+   提示长到折行时按钮不会被推走 */
+.sms-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-left: 100px; /* 标签列 88 + 间距 12 */
+}
+.sms-foot .detail { min-width: 0; }
+/* 失败提示标红（引擎给的 isError，见 ui/sms-login.js 的 setHint）：
+   与成功提示拉开一眼可辨的差别，不必等 toast */
+.sms-hint.err { color: var(--danger); }
+
 /* 行内文字链接（「小浣熊客户端登录态文件」）：点了在弹窗里显示完整路径 */
 .raccoon-hint-link { color: var(--primary-fg); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 /* 自定义提供商管理弹窗的列表（.cp-*）曾在这里：那颗「自定义提供商」按钮与
