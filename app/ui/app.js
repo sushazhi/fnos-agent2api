@@ -123,12 +123,13 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['overview', 'accounts', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
+const PAGES = ['overview', 'accounts', 'checkin', 'gateway', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它） */
 const PAGE_LABELS = {
   overview: '报表',
   accounts: '账号',
+  checkin: '签到中心',
   gateway: '模型管理',
   proxies: '网络代理',
   keys: '网关 Key',
@@ -176,6 +177,10 @@ function showPage(name, { persist = true } = {}) {
   // 定时任务页自持清单与编辑态，切进去时拉一次最新
   if (page === 'tasks') {
     window.wbTasksPanel?.load?.();
+  }
+  // 签到中心自持数据（聚合快照 + 惰性查询缓存），切进去时拉一次最新
+  if (page === 'checkin') {
+    void window.wbCheckinPanel?.load?.();
   }
   // 切到设置页时拉一次启动设置与网关地址（面板内部自持状态，这里只做转发）
   if (page === 'settings') {
@@ -260,6 +265,8 @@ function renderTopbarStatus() {
     requests: () => mirror('req-badge'),
     // 定时任务页的徽标由 tasks-panel 自己渲染（「N / M 个已开启」），直接镜像
     tasks: () => mirror('tasks-badge'),
+    // 签到中心的徽标由 checkin-page 自己渲染（自动签到开启状态），直接镜像
+    checkin: () => mirror('checkin-badge'),
     settings: () => (gatewayUp ? chip('网关运行中', 'ok', true) : chip('未就绪', 'bad', true))
       + (enabled ? chip(`${enabled} 个账号启用`) : ''),
     overview: () => (gatewayUp ? chip('网关运行中', 'ok') : chip('未就绪', 'bad'))
@@ -688,7 +695,7 @@ async function refresh() {
   }
 }
 
-// ─── 账号操作（列表按钮统一入口；积分/签到由 accounts-view 自行消化） ───
+// ─── 账号操作（列表按钮统一入口；余额查询由账号视图自行消化） ───
 
 async function runAccountAction(action, id) {
   if (busy) return;
@@ -872,7 +879,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 它**不是**更新检查那种「有新版本就提示」的可选动作 —— 没升级时账号是空的，
   // 所以过程与结果都要 toast 报出来，不能让用户面对一个「账号怎么空了」的疑问。
   void window.wbUpgradePanel?.check?.();
-  // 启动即读一次「定时查询积分」的结果快照：快照在后端是**持久化**的（重启也在），
+  // 启动即读一次后端的余额结果快照（每账号自动查询的最新结论，重启也在），
   // 只靠下面那条 20 秒轮询的话，用户启动后第一眼看到的是账号页一片「未查询」，
   // 要等最久一整轮才变出余额 —— 那正是「定时查询好像没生效、必须手动点」的来源。
   // 放在 DOMContentLoaded：islands（wbAccountsView 的注册处，见 index.html 的
@@ -901,7 +908,7 @@ setInterval(() => {
   void syncLogsBadge();
   // 请求日志的未读失败同理：人不在请求日志页时也要有人推进角标
   void syncRequestsBadge();
-  // 「定时查询积分」的结果快照也跟着这一轮读一次：后端的定时任务在跑，
+  // 余额快照也跟着这一轮读一次：后端的每账号自动查询在跑，
   // 界面得跟上它（否则用户不点按钮就永远停在启动那次的旧余额上）。
   // 快照时间戳没变时它自己会早退，不会造成无谓的重绘。
   void window.wbAccountsView?.syncBalancesSnapshot?.();

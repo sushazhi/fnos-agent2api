@@ -1,5 +1,5 @@
 appname               = agent2api
-version               = 2.9.5-1
+version               = 2.9.8-1
 display_name          = Agent2API
 desc                  = <b>多提供商账号池 → OpenAI 兼容 API 网关</b>（基于上游 agent2api），内置官方 Web 控制台；单文件静态二进制，<b>无需 Docker、无需 Node 运行时</b>，安装即用。<br><br>🤖 <b>账号池 → 标准 API：</b><br>- 标准 <code>/v1/chat/completions</code>、<code>/v1/models</code>、<code>/v1/responses</code><br>- 多账号轮转、失败重试，本地 SQLite 持久化<br>- 内置 7 个提供商适配：WorkBuddy、小浣熊（Raccoon）、CatPaw、AutoClaw、Qoder、Cline Free、Cline Pass<br><br>🖥️ <b>官方控制台：</b><br>- 账号管理、模型中心、API 密钥、运行日志、请求记录、定时任务、对话测试台<br>- 统一网关接入，复用飞牛登录态，<b>面板无需独立登录密码</b>，仅管理员可访问<br><br>🔌 <b>下游接入：</b><br>- 独立端口 <code>http://＜飞牛IP＞:3065/v1</code>，任意 OpenAI SDK 直连（统一网关路径仅供面板访问，外部客户端走不通）<br><br>🧩 <b>运行时说明：</b><br>- 上游为 Rust 静态二进制，仅依赖 glibc（≥ 2.34），<b>不依赖应用中心 Node.js 运行时</b><br>- SQLite 以 bundled 方式静态链接，运行时无额外系统依赖<br>- 账号凭据在应用数据目录中以明文存储，请勿在多人共享设备上使用
 
@@ -29,4 +29,4 @@ desktop_uidir         = ui
 desktop_applaunchname = agent2api.Application
 
 # 更新日志
-changelog             = v2.9.5-1<br>1.上游 agent2api v2.9.5 原样集成（零源码改动），面板副本与上游 tag 逐字节一致<br>2.重新编译 Linux 双架构二进制（amd64 / arm64），glibc 上限仍低于飞牛 fnOS 的 2.36<br>3.本条目由 GitHub Actions 定时检查上游后自动生成
+changelog             = v2.9.8-1<br>1.上游 agent2api v2.9.8 原样集成（零源码改动），面板副本与上游 tag 逐字节一致<br>2.重新编译 Linux 双架构二进制（amd64 / arm64），glibc 上限仍低于飞牛 fnOS 的 2.36<br>3.本条目由 GitHub Actions 定时检查上游后自动生成

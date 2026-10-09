@@ -131,6 +131,13 @@
 .models-table td.empty { padding: 26px 8px; text-align: center; color: var(--text-3); }
 
 /* 列宽（合计 100%，table-layout: fixed 下按 colgroup 分配） */
+/* 选择列：一整列只有一枚复选框，给 3.5% 的窄档（46px 上下，照账号页勾选列的量级）；
+   多出的宽度从映射列（chips 有弹性）与操作列（按钮定宽、无长文案）各挪一点 ——
+   合计仍 100%，没有换行风险。 */
+.models-table .c-check { width: 3.5%; }
+/* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
+   （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
+.models-table th[data-col="check"] { text-align: center; }
 .models-table .c-model { width: 22%; }
 .models-table .c-rate { width: 6%; }
 .models-table .c-source { width: 7%; }
@@ -139,8 +146,8 @@
    文件头的列数取舍） */
 .models-table .c-budget { width: 11%; }
 .models-table .c-caps { width: 13%; }
-.models-table .c-alias { width: 29%; }
-.models-table .c-act { width: 12%; }
+.models-table .c-alias { width: 26%; }
+.models-table .c-act { width: 11.5%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
 .keys-table .k-time { width: 16%; }

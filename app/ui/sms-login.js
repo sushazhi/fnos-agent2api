@@ -1,4 +1,4 @@
-/* Agent2API · 「手机验证码登录」交互引擎（AutoClaw 国内版 / Loomy）
+/* Agent2API · 「手机验证码登录」交互引擎（AutoClaw 国内版 / Loomy / KukuAI）
 
    与小浣熊 / Qoder 的网页登录（web-login.js）是**两套东西**，不要合并：
 
@@ -9,8 +9,11 @@
    （理由见 src-tauri/src/server/core/providers/autoclaw/login.rs 的模块头），
    硬塞进网页登录引擎只会让那边多出一堆「这条路没有窗口也没有 state」的分支。
    Loomy 同理（见 providers/loomy/login.rs 的模块头）。
+   KukuAI 是**第三条形态**：发码必须发生在官方页面里（风控签名只有页面能生成），
+   于是由壳开登录窗口自动填号发码、收码后自动登录（见 src-tauri/src/login.rs
+   的 kuku_sms_script）—— 本弹窗只负责收手机号、收验证码，窗口在幕后配合。
    国际版的手机验证码入口已从添加账号弹窗移除（它只有 Zai / Google 网页登录），
-   因此这个引擎服务的两家都在大陆号段内：规则仍按家给（Loomy 只收 `1[3-9]`，
+   因此这个引擎服务的几家都在大陆号段内：规则仍按家给（Loomy 只收 `1[3-9]`，
    见 create 里的 SMS_PROFILES），没有地区分叉。
 
    依赖 app.js 的顶层全局（经典 script 的顶层声明在全局可见）：$ / toast /
@@ -68,6 +71,19 @@
         phoneRe: /^1[3-9]\d{9}$/,
         sentHint: '验证码已发送。收到后填入下方并点「登录并添加」',
       },
+      // KukuAI：百度通行证的发码要在官方页面里点（风控签名只有页面能生成），
+      // 因此发码/登录都由**壳开的登录窗口**代做 —— send/verify 两个路径只是
+      // 为了触发桥接层（endsWith('/send') / '/verify' 判定），桥里按 provider
+      // 分派到壳命令 login_kuku_sms_send / login_kuku_sms_verify（见 bridge.rs
+      // 的 kuku 分支）。`ticketKey: 'state'` 让发码返回的 state 留在闭包里，
+      // 提交时带上（壳命令只取 code，多余字段忽略 —— 无中间态要回传）。
+      kuku: {
+        send: '/api/session/login/kuku/sms/send',
+        verify: '/api/session/login/kuku/sms/verify',
+        ticketKey: 'state',
+        phoneRe: /^1[2-9]\d{9}$/,
+        sentHint: '验证码已发送，请查看手机短信。填入下方并点「登录并添加」即完成登录',
+      },
     };
     const profile = SMS_PROFILES[prefix] || SMS_PROFILES.autoclaw;
     const PHONE_RE = profile.phoneRe;
@@ -90,6 +106,29 @@
       node.textContent = text;
       node.classList.toggle('err', isError && Boolean(text));
     };
+
+    // KukuAI：壳侧把隐藏登录窗口的进度推过来（`login:kuku-status` 事件），
+    // 面板提示行实时显示 —— 用户能看出「正在发码 / 已发出 / 需要图形验证码」，
+    // 而不是点完干等（壳侧监视任务每 1 秒读窗口标题上报，见
+    // src-tauri/src/login.rs 的 start_kuku_sms）。
+    if (prefix === 'kuku' && typeof window.workbuddyDesktop?.onKukuSmsStatus === 'function') {
+      window.workbuddyDesktop.onKukuSmsStatus(payload => {
+        const status = payload && payload.status;
+        const textByStatus = {
+          opening: '正在打开百度登录页…',
+          filling: '已填写手机号，正在发送验证码…',
+          sending: '已点发送，等待短信…',
+          sent: '验证码已发送，请查看手机短信',
+          captcha: '需要图形验证码：登录窗口已弹出，请填写后继续',
+          timeout: '发送未确认：登录窗口已弹出，请在弹出的窗口中手动完成登录',
+        };
+        const text = textByStatus[status];
+        if (!text) return;
+        setHint(text);
+        if (status === 'sent') window.wbApp.toast('验证码已发送，请查看手机短信');
+        if (status === 'captcha' || status === 'timeout') window.wbApp.toast(text, 'err');
+      });
+    }
 
     /**
      * 取可读的错误文案。

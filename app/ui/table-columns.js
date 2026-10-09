@@ -101,7 +101,7 @@
       id: 'models',
       mode: 'table',
       root: '.page[data-page="gateway"] table.models-table',
-      columns: ['model', 'rate', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
+      columns: ['check', 'model', 'rate', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
       columnsOf: visibleColumnsOf(() => window.wbModelsPanel?.visibleColumns?.()),
     },
     {
