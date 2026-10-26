@@ -1383,10 +1383,19 @@ def _upstream_bin_provenance(path):
     return []
 
 
-def check_binaries(arches):
+def check_binaries(arches, need_gateway=True):
+    """二进制预检。need_gateway=False 时只查上游二进制（见 --fetch-binaries 的用法）。
+
+    为什么要这个开关：网关二进制是**本仓库自己编**的，干净检出 / CI 的 binaries
+    job 里在取上游包的那一刻它还不存在（CI 就是「先 fetch、后 build fngateway」）。
+    早先这里无条件要求两者都在位，于是 `--fetch-binaries` 在干净检出上必然失败，
+    而且报错还让用户「先跑 --fetch-binaries」—— 2026-10-20 起 CI 每次构建都停在
+    这一步（本地因为 .local-build/bin/ 留着上一次的网关，反而看不出问题）。
+    """
     problems = []
     for arch in arches:
-        for p in bin_paths(arch):
+        paths = bin_paths(arch) if need_gateway else bin_paths(arch)[1:]
+        for p in paths:
             name = os.path.basename(p)
             if not os.path.exists(p):
                 hint = ("请先由 GitHub Actions 构建，或本地跑 "
@@ -1809,7 +1818,8 @@ def main():
                          "用于核对官方包与源码面板一致）")
     ap.add_argument("--fetch-binaries", action="store_true",
                     help="只从上游官方服务端包取两个架构的 agent2api-server 到 "
-                         ".local-build/bin/（需联网，不打包）")
+                         ".local-build/bin/（需联网，不打包）；不要求网关二进制已在位，"
+                         "干净检出可直接跑")
     ap.add_argument("--force-upstream", action="store_true",
                     help="与 --sync-upstream / --fetch-binaries 同用：忽略本地缓存重新下载")
     args = ap.parse_args()
@@ -1833,8 +1843,11 @@ def main():
         for a in arches:
             log(f"  -- {a} --")
             fetch_server_bundle(a, force=args.force_upstream)
-        log("[fetch] 二进制预检 ...")
-        check_binaries(arches)
+        # 干净检出时网关还没编（CI 的 binaries job 就是「先 fetch、后 build
+        # fngateway」），所以这一步只查刚取回的上游二进制；网关的检查留给打包前的
+        # [6/6]，那里它必须已经在位。
+        log("[fetch] 二进制预检（只查上游二进制；网关在 [6/6] 才查）...")
+        check_binaries(arches, need_gateway=False)
         log("")
         log("二进制就位（.local-build/bin/），可以打包了")
         return
