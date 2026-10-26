@@ -1,6 +1,5 @@
 MIT License
 
-Copyright (c) 2026 Agent2API (upstream project agent2api v3.1.0, https://github.com/Agent2API/agent2api)
 Copyright (c) 2026 yukihana <https://github.com/sushazhi/fnos-agent2api> (fnOS packaging, fngateway adapter)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -29,20 +28,27 @@ SOFTWARE.
 反向代理、`cmd/` 生命周期脚本、`config/`、`wizard/`、`manifest`、`build.py`、
 图标与桌面入口配置）。这部分没有引入上游代码。
 
-上游 agent2api（`Agent2API/agent2api`，本包对应 v3.1.0）不在本许可的覆盖范围内，
-它有自己的许可：MIT 条款正文**外加**一份「使用声明（Usage Notice）」（其中第 3 条
-禁止商业用途与二次分发牟利）。全文随仓库提交在 `LICENSE.upstream`（与上游
-v3.1.0 的 `LICENSE` 逐字节一致），并会被 `build.py` 原样放进 fpk 包内。
+上游 agent2api（`aimod-cc/Agent2API`，本包对应 **v3.3.0-beta.4**）不在本许可的覆盖
+范围内，它有自己的许可：**AGPL-3.0**（GNU Affero General Public License v3.0）。
+全文随仓库提交在 `LICENSE.upstream`（与上游 v3.3.0-beta.4 的 `LICENSE` 逐字节一致，
+34,523 B，sha256 `0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0`），
+并由 `build.py` 原样放进 fpk 包内。
+
+⚠️ 上游许可是**变更过**的：v3.3.0-beta.1 及更早为「MIT 条款正文 + 使用声明（其中第 3 条
+禁止商业用途与二次分发牟利）」，自 **v3.3.0-beta.2** 起改为 **AGPL-3.0**。本仓库跟到了
+AGPL-3.0 这一版，所以上一版本文档里「MIT + 使用声明」的描述**已作废**。
 
 因此，**发布出去的 fpk 包内同时存在两份许可**：
 
-  * `LICENSE.upstream` —— 上游 agent2api 的完整许可（MIT + 使用声明），
-    约束包内的 `agent2api-server` 二进制。
+  * `LICENSE.upstream` —— 上游 agent2api 的 AGPL-3.0 全文，约束包内的
+    `agent2api-server` 二进制与上游面板。
   * 本文件 —— 仅约束适配层。
 
-两者若对某一行为给出不同结论，以**更严格**的一方为准。就本项目的实际用途而
-言：上游使用声明第 3 条明确「个人学习、研究、自用，以及不以牟利为目的的分享与
-交流，不受本条限制」，所以自用打包与分发不受该条约束。
+AGPL-3.0 是**强 copyleft**：对外分发本包（包括公开的 GitHub Release）属于「分发」，
+除随包附许可全文外，还须提供对应源码（§6）；以网络方式与本程序交互的用户应能获得
+其对应源码（§13）。包内 `UPSTREAM.txt` 已写明对应源码的获取地址（上游仓库 / 该 tag
+目录 / 源码 tarball），以及本包对上游**唯一**的产物层改动（`ui/m/mobile.js` 里 SW 注册
+scope 由 `"/"` 改为 `"./"`，1 字节）。
 
-上游许可见 https://github.com/Agent2API/agent2api 的 `LICENSE` 文件
-（本仓库固定的版本：https://github.com/Agent2API/agent2api/blob/v3.1.0/LICENSE ）。
+上游许可与源码：https://github.com/aimod-cc/Agent2API
+（本仓库固定的版本：https://github.com/aimod-cc/Agent2API/tree/v3.3.0-beta.4 ）

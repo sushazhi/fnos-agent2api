@@ -1,12 +1,13 @@
 name: Check upstream and release
 
-# 每天检查一次上游 **Agent2API/agent2api** 有没有新版本；有就自动走完
+# 每天检查一次上游 **aimod-cc/Agent2API** 有没有新版本；有就自动走完
 # 「改 pin → 重新钉二进制 sha256 → 同步面板 → 改 manifest → 提交 main →
 #  打 tag → 触发构建发布」。
 #
 # ── 上游在哪 ─────────────────────────────────────────────────
-# 2026-10-18：上游从 aimod-cc/agent2api 迁到 **Agent2API/agent2api**（旧地址
-# API 与 codeload 都是 404）。仓库名**不写死在任何脚本里**，统一由
+# 上游仓库迁过两次：2026-10-18 从 aimod-cc/agent2api 迁到 Agent2API/agent2api
+# （当时旧地址 404），2026-10-24 又因 Agent2API 账号整体消失而**迁回**
+# aimod-cc/Agent2API。仓库名**不写死在任何脚本里**，统一由
 # build.py 的 UPSTREAM_REPO 提供；本文件不重复它，以免两处不同步。
 #
 # v3.1.0 起上游官方发布 Linux 服务端包

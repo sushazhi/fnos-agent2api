@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """build.py — fnos-agent2api 打包脚本（跨平台）
 
-上游 Agent2API/agent2api（Rust 单二进制 + 自托管面板）**原样使用**；本仓库只
-提供飞牛适配层（fngateway / cmd / config / wizard / manifest / 图标 / 上游
-WebUI），不改上游源码。
+上游 aimod-cc/Agent2API（Rust 单二进制 + 自托管面板，许可 AGPL-3.0）**原样使用**；
+本仓库只提供飞牛适配层（fngateway / cmd / config / wizard / manifest / 图标 /
+上游 WebUI 的注入），不改上游源码 —— 唯一的产物层改动是补丁 SW scope 那 1 字节。
 
 产物: agent2api-<manifest 版本>-<arch>.fpk（每架构一个包，装哪台给哪个）
 
@@ -19,8 +19,9 @@ WebUI），不改上游源码。
   * **二进制与面板都取自上游官方 Release 资产**（agent2api-server-linux-<arch>
     .tar.gz，见 UPSTREAM_BUNDLE_SHA256）：v3.1.0 起上游自己发布 Linux 服务端包，
     本仓库不再需要 Rust 工具链、不再自编译。本机/CI 都不需要 WSL/Docker。
-  * 上游 WebUI（desktop-tauri/ui，v3.2.0-beta.2 为 213 个文件）直接随包进 app/ui/
-  * 额外校验: 面板入口文件齐备、i18n 六语词典齐全、PWA 文件在、面板资源引用是
+  * 上游 WebUI（desktop-tauri/ui，v3.3.0-beta.4 为 218 个文件）不再入库，构建时
+    从官方包解包目录注入 app/ui/
+  * 额外校验: 面板入口文件齐备、i18n 五语词典齐全、PWA 文件在、面板资源引用是
     裸相对路径（fngateway 的 HTML 改写依赖这一形态；一旦上游改成绝对路径，网关
     会静默失效）、上游二进制的 glibc 要求 ≤ 飞牛上限、防替身二进制
 
@@ -31,12 +32,13 @@ WebUI），不改上游源码。
     python build.py --fetch-binaries   # 只从上游官方包取二进制到 .local-build/bin/
     python build.py --sync-upstream    # 从上游官方包同步面板进 app/ui
     python build.py --sync-upstream-src  # 改从上游 tag 源码同步面板（核对用）
-    python build.py --version 3.2.0-beta.2-1  # 覆盖版本号
+    python build.py --version 3.3.0-beta.4-1  # 覆盖版本号
 
 上游内容怎么进来:
-    * app/ui/（面板）**随仓库提交**，打包不联网也能出包；
-      `--sync-upstream` 用上游官方包里的 ui/ 刷新它，随后由
-      verify_webui_provenance() 按钉住的树哈希核对。
+    * app/ui/（面板）**不在仓库里**（2026-10-20 起），只有本项目自己的
+      `config` 与 `images/`；213 个面板文件由 stage_ui() 在组装时从官方包解包
+      目录注入，`verify_webui_provenance()` 按钉住的树哈希逐架构核对。
+      所以**干净克隆必须先 `--fetch-binaries`** 把官方包落到 .local-build/。
     * agent2api-server 的 Linux 二进制由 `--fetch-binaries` 从同一个官方包取，
       sha256 与 build.py 里钉住的值逐一核对。CI 走的就是这条路
       （见 .github/workflows/build-and-release.yml）。
@@ -70,24 +72,30 @@ APP_NAME = "agent2api"
 
 # --- 上游（版本与 manifest 的 x.y.z-N 对应）---
 #
-# 2026-10-18：上游仓库从 aimod-cc/agent2api 迁到 Agent2API/agent2api。
-# 旧地址现在 API 与 codeload 都是 404（已实测），所以这次是**换仓库**而不是
-# 「改个版本号」：新仓库里根本没有 v2.9.x 的 tag，只有 v3.1.0 起。
+# 上游仓库迁过两次，**换仓库时只改这一个常量**（tools/bump_upstream.py 与两条
+# workflow 都从这里读，不各自硬编码）：
+#   2026-10-18  aimod-cc/agent2api   →  Agent2API/agent2api（当时旧地址 404）
+#   2026-10-24  Agent2API/agent2api  →  aimod-cc/Agent2API（**迁回原仓库**）
 #
-# 2026-10-20：pin 到上游 **预发布** v3.2.0-beta.2。这是本仓库第一次跟预发布，
-# 与「自动流水线只跟正式版本」的约定不冲突：tools/bump_upstream.py 仍然只在
-# **正式版**里挑候选，只是现在也**能解析**预发布串，于是「pin 是预发布、上游最新
-# 正式版更旧」会被判为「已是最新」，而不是「无法解析」直接退出。
+# 最后一次迁移的实测依据（2026-10-24）：`Agent2API/agent2api` 与 `Agent2API`
+# 账号本身都是 404（账号已消失，同一时刻 api.github.com 对 torvalds/linux 返回
+# 200，故非本机网络问题）；而 `aimod-cc/Agent2API` 可达 —— 它是同一账号下
+# 2026-09-11 创建的原仓库（仓库名大写为 `Agent2API`，与小写 `agent2api` 是同一个
+# 仓库，GitHub 对仓库名大小写不敏感），1360 star，release 线一直延伸到今天。
 #
-# ⚠️ 同时实测到一个上游侧的事实：Agent2API/agent2api 的 REST API 与网页现在都
-# 返回 **404**（连 Agent2API 这个账号本身也是 404，而同一时刻 api.github.com 对
-# torvalds/linux 返回 200）。也就是说这个 pin 对应的官方资产**已经下不下来**了：
-# 源码 tarball 与 agent2api-server-linux-<arch>.tar.gz 全部 404。本次构建因此
-# 只能用**已经落在 .local-build/ 里的那两个官方包**（sha256 已钉在
-# UPSTREAM_BUNDLE_SHA256，离线复用路径不联网）。若上游不恢复，
-# tools/bump_upstream.py 的定时跟进与 CI 全量构建都会失败 —— 详见 README §9.4。
-UPSTREAM_REPO = "Agent2API/agent2api"
-UPSTREAM_VERSION = "3.2.0-beta.2"
+# ⚠️ 这次迁回**不是**「只改个 URL」：新仓库的 tag 里**没有** v3.1.0 与
+# v3.2.0-beta.2（那两个只存在于已消失的 Agent2API 账号下，是本仓库上一轮 pin 的
+# 对象）。继续 pin 它们，`--fetch-binaries` 与 `verify_upstream_version` 都会
+# 404，所以 pin 必须换成新仓库真实存在的 release。
+#
+# 2026-10-26：pin 跟到上游 **预发布** v3.3.0-beta.4（该仓库当前最新 release，
+# 上一个 pin 是 v3.3.0-beta.3）。
+# 本仓库跟预发布与「自动流水线只跟正式版」的约定不冲突：tools/bump_upstream.py
+# 只在**正式版**里挑候选，但能解析预发布串，于是「pin 比上游最新正式版新」被判为
+# 「已是最新」，而不是「无法解析」直接退出。新仓库的正式版线目前最高是 v3.0.8，
+# 比本 pin 旧；上游一旦发 v3.3.0 或更后的正式版，定时跟进会正常接上。
+UPSTREAM_REPO = "aimod-cc/Agent2API"
+UPSTREAM_VERSION = "3.3.0-beta.4"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
@@ -134,8 +142,8 @@ UPSTREAM_URLS = (
 # 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
 UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
 UPSTREAM_BUNDLE_SHA256 = {
-    "amd64": "89ec624cbd633fc9fe22a085c05a518b7f6a91828930eba60d450898376ad338",
-    "arm64": "e2eb299343fa704174113e63f4aa33d5280ae949bd6c7e6ab4ef16617fc8aee3",
+    "amd64": "675210b97cbaf1ae7504b509a20749bc925aaa0113009f2a270935448c344221",
+    "arm64": "1430c20870601f9946e73c6eed9f4259a6c17638363251298a217337c640d12c",
 }
 # 包内二进制名（解包后即叫这个名，无需改名）与包内 UI 目录名。
 UPSTREAM_BUNDLE_BIN = "agent2api-server"
@@ -165,13 +173,13 @@ def bundle_urls(arch):
     )
 
 
-# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 213 个文件，排除本项目自己
+# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 218 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
 #
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "011b905c2ac3ae70d69f5865922e35f89f59af5d20a889ca0a87860e1f32059e"
+UPSTREAM_UI_SHA256 = "bf07ea4a3dbe472ffa1e786f9cea0aab8930e50174b46dfcd04f50e557d9ec70"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 #
@@ -193,7 +201,7 @@ UPSTREAM_BIN = "agent2api-server-linux-{arch}"
 GATEWAY_BIN = "fngateway-linux-{arch}"
 
 # --- 随包上游 WebUI ---
-# 上游仓库 desktop-tauri/ui/ 下的全部文件（v3.2.0-beta.2：213 个，约 5 MB）原样进 app/ui/。
+# 上游仓库 desktop-tauri/ui/ 下的全部文件（v3.3.0-beta.4：218 个）原样进 app/ui/。
 # 必需文件缺失不会导致打包失败，只会让面板白屏或某个功能区失效 —— 属于
 # 「装完才发现」的静默缺陷。
 #
@@ -209,6 +217,17 @@ GATEWAY_BIN = "fngateway-linux-{arch}"
 # 列表无需增删；面板从 208 涨到 213 个文件。注意 i18n 目录从「六语」变成
 # 「五语」—— 新面板的 `zh-CN` 不再是 i18n/ 下的词典目录（简体中文改由基准文案
 # 承担），所以这里**不能**把 zh-CN 加进 UI_REQUIRED，否则构建会误报缺文件。
+#
+# v3.3.0-beta.3 复核结果（2026-10-24，实测）：16 项里 15 项在（`ui/config` 是
+# 本项目自己的条目，不在上游包里）；面板仍是 213 个文件，相对 3.2.0-beta.2
+# **新增 0 / 删除 0 / 修改 59**（纯内容迭代：i18n 39、css 6、islands 2、m 2、
+# 根 js 8、html 2），无新增顶层文件、无新增提供商图标（44 个全未变）。
+#
+# v3.3.0-beta.4 复核结果（2026-10-26，实测）：16 项里仍是 15 项在（`ui/config` 是
+# 本项目自己的条目）；面板涨到 218 个文件（相对 beta.3 新增 7 / 删除 2 / 修改 109），
+# 新增的是 css/page-routing{,-trace}.css 与 5 种语言的 i18n/*/routing.js，删掉的是
+# titlebar.js、tooltip.js。每个语言的词典域因此从 19 涨到 20 —— 语言集仍是五语
+# （无 zh-CN），而 i18n 校验是从目录列表动态推导 locale，所以**列表无需增删**。
 UI_REQUIRED = (
     "ui/index.html",
     "ui/login.html",
@@ -244,6 +263,14 @@ ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
 # shouldRewrite() 负责给它补前缀（它改写的是**不带**前缀的裸相对/根绝对路径），
 # 所以这里不能当成「上游改成绝对路径 → 网关静默失效」来报错，否则会误伤。
 # v3.2.0-beta.2 实测仍然只有这一处根绝对路径（52 个资源引用里唯一一个），白名单不变。
+#
+# v3.3.0-beta.3 实测（2026-10-24）：那一处**没了** —— 手机端链接改成非根绝对写法，
+# index.html 的资源引用 52 → 51 个、根绝对路径由 1 降到 **0**。这只会让本白名单
+# 空转（_unexpected_root_abs 返回空集即通过），**不是**「改写失效」，故白名单保留：
+# 上游若把 `/m` 写回去，这里仍按「已登记、由网关补前缀」处理。
+#
+# v3.3.0-beta.4 实测（2026-10-26）：根绝对引用仍是 **0**（index.html 资源引用
+# 51 → 50），白名单继续空转，`_unexpected_root_abs()` 返回空集。
 ROOT_ABS_ALLOWED = ("/m",)
 
 
@@ -842,6 +869,12 @@ def patch_sw_scope(dst):
     多了一个 `updateViaCache`。这不影响本函数 —— SW_REGISTER_RE 只认到
     `register("sw.js",` 为止（靠那个逗号定位，不跨 `}` 匹配），SW_SCOPE_LITERAL_RE
     再在实参文本里找 `scope:"/"`，所以照样改得动（实测 n=1）。
+
+    v3.3.0-beta.3 实测（2026-10-24）：注册写法与 3.2.0-beta.2 **完全同形**，
+    仍然命中且只命中 1 处（`m/mobile.js`），补丁后 +1 字节。
+
+    v3.3.0-beta.4 实测（2026-10-26）：写法仍未变，同样命中且只命中 1 处，
+    补丁后 `scope:"./"`（`ui/m/mobile.js` 里 `serviceWorker.register` 仅 1 次）。
     """
     target = os.path.join(dst, "m", "mobile.js")
     if not os.path.isfile(target):
@@ -1447,7 +1480,9 @@ def assemble(arch, version):
     with open(os.path.join(STAGE_DIR, "manifest"), "w", encoding="utf-8") as f:
         f.write(mf)
 
-    # 上游署名与许可（MIT 要求随二进制附带许可全文）
+    # 上游署名与许可。**2026-10-24 起上游是 AGPL-3.0**（v3.3.0-beta.2 之前是
+    # MIT + 使用声明），所以这里按 AGPL 的义务写：随包附许可全文（同目录
+    # LICENSE.upstream）+ 指明 Corresponding Source 的获取位置。
     # 时间戳尊重 SOURCE_DATE_EPOCH（可复现构建惯例）：设了就固定，没设才用当前时间。
     # CI 里同一个 commit 的两次打包因此得到逐字节相同的 UPSTREAM.txt。
     epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
@@ -1462,25 +1497,31 @@ def assemble(arch, version):
             "本应用内置上游 agent2api（agent2api-server）。\n\n"
             f"上游项目: https://github.com/{UPSTREAM_REPO}\n"
             f"上游版本: {UPSTREAM_TAG}\n"
-            "上游许可: MIT License 正文，文件末尾附有「使用声明」\n"
-            "上游版权: Copyright (c) 2026 Agent2API\n"
+            "上游许可: GNU Affero General Public License v3.0 (AGPL-3.0)\n"
+            "上游版权: Copyright (c) 2026 aimod-cc\n"
             f"二进制来源: 上游官方 Release 资产 {UPSTREAM_BUNDLE_ASSET.format(arch='<arch>')}\n"
             f"（sha256 已钉在 build.py 的 UPSTREAM_BUNDLE_SHA256，取用后校验）\n"
             f"构建时间: {build_time}\n\n"
-            "依据 MIT 许可，源码与二进制形式的再分发均保留原始版权声明与许可声明。\n"
-            "上游许可全文见同目录 LICENSE.upstream；源码可自 "
-            f"https://github.com/{UPSTREAM_REPO} 获取。\n\n"
-            "本包未修改上游源码：飞牛适配层（fngateway 反向代理、生命周期脚本、\n"
-            "桌面入口）是本项目独立新增的组件，不含上游代码。\n\n"
-            "注意：上游 LICENSE 除 MIT 条款外另附「使用声明」，其中限制商业用途。\n"
-            "本打包项目仅供个人在自有飞牛设备上自用。\n"
+            "上游许可全文见同目录 LICENSE.upstream。\n"
+            "对应源码（Corresponding Source）可自上游仓库获取：\n"
+            f"  · 仓库: https://github.com/{UPSTREAM_REPO}\n"
+            f"  · 该版本: https://github.com/{UPSTREAM_REPO}/tree/{UPSTREAM_TAG}\n"
+            f"  · 源码包: https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz\n\n"
+            "本包对上游的唯一改动：面板 ui/m/mobile.js 里 Service Worker 注册的\n"
+            "scope 由 \"/\" 改为 \"./\"（1 字节），因为本应用挂在 /app/agent2api 子路径下，\n"
+            "原值会让浏览器抛 SecurityError。改动脚本见本项目 build.py 的 patch_sw_scope()，\n"
+            "据此可准确重建该文件；除此之外上游二进制与面板逐字节原样。\n\n"
+            "飞牛适配层（fngateway 反向代理、生命周期脚本、桌面入口）是本项目独立新增的\n"
+            "组件，以 MIT 发布，不含上游代码。\n\n"
+            "AGPL-3.0 第 13 条：以网络方式与本程序交互的用户，可获得其对应源码 ——\n"
+            "上述上游仓库地址即源码入口。\n"
         )
     lic = os.path.join(PROJECT_DIR, "LICENSE.upstream")
     if os.path.exists(lic):
         copy_tree(lic, os.path.join(STAGE_DIR, "LICENSE.upstream"))
     else:
         log("  [警告] 缺少 LICENSE.upstream，包内将不含上游许可全文；"
-            "MIT 再分发义务未完成，请补齐后再发布")
+            "AGPL-3.0 的再分发义务未完成，请补齐后再发布")
 
 
 # ---------------------------------------------------------------------------

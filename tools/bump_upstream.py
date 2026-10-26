@@ -19,7 +19,8 @@
 执行，也可以本地手动跑。
 
 上游仓库名不在这里硬编码：一律读 build.UPSTREAM_REPO（换仓库时只改 build.py
-一处，见 2026-10-18 从 aimod-cc/agent2api 迁到 Agent2API/agent2api 那次）。
+一处。已迁过两次：2026-10-18 aimod-cc/agent2api → Agent2API/agent2api，
+2026-10-24 因 Agent2API 账号消失又迁回 aimod-cc/Agent2API）。
 
 为什么只改 pin 而不是 fork 上游
 -------------------------------

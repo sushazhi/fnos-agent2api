@@ -4,8 +4,9 @@ name: Build and Release Agent2API for fnOS
 #
 # ── 这个仓库里有什么、缺什么 ──────────────────────────────────
 # 本仓库只有**飞牛适配层**（fngateway 反向代理、cmd/ 生命周期脚本、config/、
-# wizard/、manifest、桌面入口与图标）以及上游 WebUI 的一份副本（app/ui/）。
-# 它**不含**上游源码 —— 上游 Agent2API/agent2api 是 Rust 单文件二进制，
+# wizard/、manifest、桌面入口与图标）。上游 WebUI 自 2026-10-20 起也不入库，
+# 构建时从官方包注入（见 build.py 的 stage_ui）。
+# 它**不含**上游源码 —— 上游 aimod-cc/Agent2API 是 Rust 单文件二进制，
 # 二进制与面板都由上游自己发布。
 #
 # 所以 CI 干两件事：
@@ -16,7 +17,8 @@ name: Build and Release Agent2API for fnOS
 # 拉到 .local-build/bin/ 即可（CI 走的是同一条路径）。
 #
 # ── 二进制怎么来的（2026-10 起）──────────────────────────────
-# 上游从 aimod-cc/agent2api 迁到 **Agent2API/agent2api**，并且 v3.1.0 起
+# 上游仓库迁过两次（aimod-cc/agent2api → Agent2API/agent2api → 2026-10-24
+# 迁回 **aimod-cc/Agent2API**），并且 v3.1.0 起
 # **官方发布 Linux 服务端包**：
 #   agent2api-server-linux-<arch>.tar.gz        （二进制 + ui/ + install.sh …）
 #   agent2api-server-linux-<arch>.tar.gz.sha256 （sha256sum 格式）
