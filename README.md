@@ -73,7 +73,7 @@ cd fngateway; go vet ./...; go test ./...        # 37 个测试
 
 ## 3. 安装与使用
 
-下载 <https://github.com/sushazhi/fnos-agent2api/releases/latest>（amd64 12,125,532 B / arm64 11,475,643 B），装进应用中心即可。`./cmd/main start|stop|status`。升级保留数据与 `apikey`（幂等）；卸载向导默认保留数据；⚠️ 从 v2.9 / v3.1.0 / 3.2.0-beta.2 升级的数据兼容未实测，先备份 `${TRIM_PKGVAR}`（含 `-wal`/`-shm`）。
+下载 <https://github.com/sushazhi/fnos-agent2api/releases/latest>（`v3.3.0-beta.4-1`：amd64 13,659,132 B / arm64 12,955,546 B，校验值见同页 `SHA256SUMS.txt`），装进应用中心即可。`./cmd/main start|stop|status`。升级保留数据与 `apikey`（幂等）；卸载向导默认保留数据；⚠️ 从 v2.9 / v3.1.0 / 3.2.0-beta.2 升级的数据兼容未实测，先备份 `${TRIM_PKGVAR}`（含 `-wal`/`-shm`）。
 
 控制台点图标即用，仅管理员可见、无需单独登录；面板的「检查更新」在飞牛上不可用，升级走应用中心。下游接入用独立端口（⚠️ 别指向 `/app/agent2api`，飞牛 1.2.0604+ 会拦截非 ticket 的 `Authorization` 头）：
 
@@ -101,9 +101,11 @@ client = OpenAI(base_url="http://192.168.0.2:3065/v1", api_key="<cat /var/apps/a
 
 ## 6. 验证状态
 
-**v3.3.0-beta.4 实测（2026-10-26，Windows 构建机，无真机）**：产物 amd64 13,658,746 B（`349f5158…`）；**arm64 本轮未出包**（只要求 amd64）。内层 `app.tgz` 225 个文件，其中 `app/ui/` 221（面板 218 + `config` + 2 图标）、i18n 域文件 101（`manifest.js` + 5 语 × 20 域）；官方包 amd64 10,414,609 B（`675210b9…`）/ arm64 10,038,256 B（`1430c208…`），**本地实算 = 上游 `.sha256` 资产 = GitHub API digest 三方一致**；包内二进制 amd64 15,478,576 B / arm64 14,049,112 B（beta.3 为 13,140,208 / 11,951,592），ELF 架构正确（`0x3E` / `0xB7`），最高 GLIBC 2.34，内嵌版本串 `3.3.0-beta.4`；面板 218 文件（相对 beta.3 **新增 7 / 删除 2 / 修改 109**，补丁后树哈希 `bf07ea4a3dbe472ffa1e786f9cea0aab8930e50174b46dfcd04f50e557d9ec70`，逐架构各校一次）。`build.py --check` 全绿，打包后**独立解包复核**通过（包内 manifest `version=3.3.0-beta.4-1`、`UPSTREAM.txt` 上游版本 `v3.3.0-beta.4`、`ui/m/mobile.js` 的 SW scope 为 `./`、两二进制 755 且内嵌版本串正确）。
+**v3.3.0-beta.4-1 发布产物（CI，`build-and-release.yml` run #12，2026-10-26，权威指纹）**：`agent2api-3.3.0-beta.4-1-amd64.fpk` 13,659,132 B（sha256 `a5d3a17390988896f147ee34aa6bc814b8ea47790d341935133741d6874c23e4`）/ `arm64.fpk` 12,955,546 B（`0632f469f8542c095d22598a71b9e4104c4bdd839f62ee6c842c3606cb2a3591`），同页附 `SHA256SUMS.txt`。这是 2026-10-20 那次 refactor 之后**第一次跑通的 CI 构建**。
 
-⚠️ 本轮顺带修掉一处**陈旧缓存隐患**：`.local-build/bin/` 里的网关二进制原是 `-Version 3.1.0-2`（Go 1.27.1）编的旧产物 —— 代码未变（比最后一个 `.go` 源文件新），但版本串陈旧，启动日志与 `--version` 会报 `3.1.0-2`。已按 CI 同口径重编：`-X main.version=3.3.0-beta.4-1`（Go 1.27.3，`CGO_ENABLED=0`），amd64 7,700,640 B / arm64 7,143,584 B。
+**同版本本地复现（Windows 构建机，无真机）**：产物 amd64 13,658,746 B（`349f5158…`）—— 与 CI 那份相差 386 B，符合 §2.3 记录的「fnpack 的 tar 元数据与 gzip 层每次不同，fpk 不可逐字节复现」。内层 `app.tgz` 225 个文件，其中 `app/ui/` 221（面板 218 + `config` + 2 图标）、i18n 域文件 101（`manifest.js` + 5 语 × 20 域）；官方包 amd64 10,414,609 B（`675210b9…`）/ arm64 10,038,256 B（`1430c208…`），**本地实算 = 上游 `.sha256` 资产 = GitHub API digest 三方一致**；包内二进制 amd64 15,478,576 B / arm64 14,049,112 B（beta.3 为 13,140,208 / 11,951,592），ELF 架构正确（`0x3E` / `0xB7`），最高 GLIBC 2.34，内嵌版本串 `3.3.0-beta.4`；面板 218 文件（相对 beta.3 **新增 7 / 删除 2 / 修改 109**，补丁后树哈希 `bf07ea4a3dbe472ffa1e786f9cea0aab8930e50174b46dfcd04f50e557d9ec70`，逐架构各校一次）。`build.py --check` 全绿，打包后**独立解包复核**通过（包内 manifest `version=3.3.0-beta.4-1`、`UPSTREAM.txt` 上游版本 `v3.3.0-beta.4`、`ui/m/mobile.js` 的 SW scope 为 `./`、两二进制 755 且内嵌版本串正确）。
+
+⚠️ 本轮顺带修掉两处**只在干净检出/CI 上才暴露**的问题：① `.local-build/bin/` 里的网关二进制原是 `-Version 3.1.0-2`（Go 1.27.1）编的旧产物 —— 代码未变（比最后一个 `.go` 源文件新），但版本串陈旧，启动日志与 `--version` 会报 `3.1.0-2`；已按 CI 同口径重编 `-X main.version=3.3.0-beta.4-1`（Go 1.27.3，`CGO_ENABLED=0`），amd64 7,700,640 B / arm64 7,143,584 B。② `--fetch-binaries` 里的 `check_binaries()` 会硬失败于「缺少产物 fngateway-linux-*」，而网关是**本仓库自己编**的、干净检出时还不存在（CI 的 binaries job 正是「先 fetch、后 build fngateway」）—— 于是 2026-10-20 起 CI 每次都停在这一步，README §2.1 让干净克隆先跑 `--fetch-binaries` 的用法同样打不出来；已改为 `check_binaries(arches, need_gateway=False)`，打包路径 [6/6] 仍要求网关在位。
 
 **网关改写面复核结论：无需改网关源码。** 与上一版同构 —— `fetch('/api/...')` 根绝对仍是 **5** 处（同一批登录页调用）、无裸相对 `api/…` / `./…` / 绝对 `http(s)://` `fetch`、面板内硬编码 `/app/agent2api` **0** 处、`navigationLiteralRe` 命中仍是唯一 **1** 处（`m/mobile.js` 的 `/login?next=%2Fm`）、`agent2api.*` 键 0 新增、图标 44/44、i18n 5 语 × **20** 域（新增的 `i18n/*/routing.js` 五语齐备）。变化仅在量上：`/api/` 字面量 174 → **222**（新页面带来更多调用，形态未变，仍由网关的 fetch 前缀桥接覆盖）；`index.html` 资源引用 51 → **50**，根绝对引用仍是 **0**。
 
