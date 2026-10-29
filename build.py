@@ -90,10 +90,14 @@ APP_NAME = "agent2api"
 #
 # 2026-10-26：pin 跟到上游 **预发布** v3.3.0-beta.4（该仓库当前最新 release，
 # 上一个 pin 是 v3.3.0-beta.3）。
-# 本仓库跟预发布与「自动流水线只跟正式版」的约定不冲突：tools/bump_upstream.py
-# 只在**正式版**里挑候选，但能解析预发布串，于是「pin 比上游最新正式版新」被判为
-# 「已是最新」，而不是「无法解析」直接退出。新仓库的正式版线目前最高是 v3.0.8，
-# 比本 pin 旧；上游一旦发 v3.3.0 或更后的正式版，定时跟进会正常接上。
+# 自动流水线跟不跟预发布，取决于**pin 自己所在的频道**（tools/bump_upstream.py
+# 的 upstream_versions(allow_prerelease=cur[3] == 0)）：pin 是正式版就只在正式版
+# 里挑候选，pin 是预发布就让预发布也进候选集。所以站在这条预发布线上，上游发
+# 每一版 beta 都能被定时任务看见；上游一旦发出 3.3.0 正式版，会自动升过去，
+# 频道随之收回正式版。
+# （2026-10-29 之前是写死「只跟正式版」：pin 挪到 beta 线后，正式版线还停在
+#  v3.0.8，而 3.0.8 < 3.3.0-beta.4 恒成立，于是每天判定「已是最新」，
+#  beta.5 根本进不了候选集 —— 就是「Actions 检查不到上游更新」的真因。）
 UPSTREAM_REPO = "aimod-cc/Agent2API"
 UPSTREAM_VERSION = "3.3.0-beta.4"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"

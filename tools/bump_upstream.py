@@ -66,10 +66,18 @@ import build  # noqa: E402  （要放在 sys.path 调整之后）
 # **能解析**预发布串 —— 否则 main() 一开头的 `cur = parse_ver(build.UPSTREAM_VERSION)`
 # 会直接 SystemExit「无法解析」，连 --detect 都跑不起来。
 #
-# 但「能解析」不等于「会自动跟」：upstream_versions() 仍只把**正式版**放进候选集。
-# 于是「pin 是预发布、上游最新正式版反而更旧」会被判为「已是最新」并早退，
-# 与「预发布要不要跟由人决定」的原有约定一致；等上游发出 3.2.0 正式版，
-# 3.2.0 > 3.2.0-beta.2 成立，才会照常自动跟进。
+# 跟不跟预发布由**当前 pin 所在的频道**决定（upstream_versions 的
+# allow_prerelease，由 main() 按 cur[3] 传入）：
+#   · pin 是正式版 → 候选集只含正式版，不会被上游的 beta 抢跑；
+#   · pin 是预发布 → 预发布也进候选集，上游每发一版 beta 都能被看见；
+#   · 上游一旦发出同号或更新的正式版（3.3.0 > 3.3.0-beta.5），照常自动升过去，
+#     升级后 pin 回到正式版，频道随之收回正式版。
+#
+# 这条规则是 2026-10-29 补上的。此前是**写死只收正式版**（`if v[3] == 1`），
+# 在 pin 还停在 3.0.x 时没问题；但 2026-10-24 pin 跟着上游挪到 3.3.0-beta 线
+# 之后就成了死锁：上游正式版线停在 v3.0.8，而 3.0.8 < 3.3.0-beta.4 恒成立，
+# 于是每天判定「已是最新」，连 v3.3.0-beta.5（2026-10-29 发布）都进不了候选集，
+# 表现就是「GitHub Actions 检查不到上游更新」。
 #
 # 表示法：正式版 → (major, minor, patch, 1, ())；预发布 →
 # (major, minor, patch, 0, ((类, 段), …))。于是 3.2.0-beta.2 < 3.2.0，
@@ -132,16 +140,55 @@ def api_get(path, token=None):
         return json.load(r)
 
 
-def upstream_versions(token=None):
-    """列出上游所有「正式版本」号。
+def release_assets(rel):
+    """一个 Release 里的资产名集合。"""
+    return {a.get("name") for a in (rel.get("assets") or []) if a.get("name")}
+
+
+def has_bundle_assets(names):
+    """Release 里是否齐了「两个架构的 Linux 官方包 + 各自的 .sha256」。
+
+    这条只对**预发布**候选生效（见 upstream_versions）：上游存在只有 tag、
+    没有 Release 的标签 —— 实测 v3.3.0-beta.5.1 就是这样（tag 在，releases
+    里没有它）。把它当成候选，fetch_bundle_sha256() 会在取 .sha256 时拿到 404
+    并硬失败，整个 job 红掉；按「没有资产就不算一个可跟进的版本」跳过它，
+    下一个真实版本（v3.3.0-beta.5）照常跟进。
+
+    正式版**不**加这条限制：上游从 v3.1.0 才开始发官方 Linux 包，更早的正式版
+    （v2.x、v3.0.x）本来就没有这些资产，套上它会把这些版本从候选集里误删。
+    """
+    for arch in ("amd64", "arm64"):
+        asset = build.UPSTREAM_BUNDLE_ASSET.format(arch=arch)
+        if asset not in names or f"{asset}.sha256" not in names:
+            return False
+    return True
+
+
+def upstream_versions(token=None, allow_prerelease=False):
+    """列出上游候选版本号（allow_prerelease 见文件头「跟不跟预发布」）。
 
     tags 是权威来源 —— 本仓库升级的是「上游 tag 对应的那份产物」。
-    releases/latest 只作兜底（万一上游先发 Release 后补 tag）。
-
-    预发布（--prerelease / tag 带 -rc 之类）由 parse_ver 的严格正则挡掉：
-    自动流水线只跟正式版本。
+    releases 只用来回答一个问题：这个 tag 有没有可下载的官方包。
+    releases/latest 作兜底（万一上游先发 Release 后补 tag）。
     """
     found = set()
+    released = {}   # 版本 -> 该版本的 Release 是否带完整官方包资产
+    skipped = []    # 只记日志用：没有资产而被跳过的预发布 tag
+
+    for page in (1, 2):
+        try:
+            rels = api_get(f"repos/{build.UPSTREAM_REPO}/releases"
+                           f"?per_page=100&page={page}", token)
+        except Exception as e:
+            log(f"  [提示] 读取上游 releases 第 {page} 页失败: {e}")
+            break
+        if not isinstance(rels, list) or not rels:
+            break
+        for r in rels:
+            v = parse_ver(r.get("tag_name", ""))
+            if v:
+                released[v] = has_bundle_assets(release_assets(r))
+
     for page in (1, 2):
         try:
             tags = api_get(f"repos/{build.UPSTREAM_REPO}/tags?per_page=100&page={page}", token)
@@ -156,9 +203,18 @@ def upstream_versions(token=None):
             break
         for t in tags:
             v = parse_ver(t.get("name", ""))
-            # 只收**正式版**：候选集里出现预发布，会让「自动跟进」越过人工决定。
-            if v and v[3] == 1:
-                found.add(v)
+            if not v:
+                continue
+            if v[3] == 1:
+                found.add(v)          # 正式版：一直如此
+            elif allow_prerelease:
+                if released.get(v):
+                    found.add(v)      # 预发布且带官方包资产：可跟
+                elif v not in skipped:
+                    skipped.append(v)
+                    log(f"  [提示] 跳过预发布 {ver_str(v)}："
+                        "没有带 Linux 官方包资产的 Release（只有 tag）")
+
     try:
         rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/latest", token)
         v = parse_ver(rel.get("tag_name", ""))
@@ -168,7 +224,8 @@ def upstream_versions(token=None):
         log(f"  [提示] 读取 releases/latest 失败，忽略: {e}")
     if not found:
         raise RuntimeError(
-            f"未能从上游 {build.UPSTREAM_REPO} 取到任何版本号"
+            f"未能从上游 {build.UPSTREAM_REPO} 取到任何"
+            f"{'（含预发布）' if allow_prerelease else ''}版本号"
             "（仓库迁址 / API 限流 / 网络？）"
         )
     return found
@@ -508,8 +565,13 @@ def main():
     if cur is None:
         raise SystemExit(f"ERROR: build.py 的 UPSTREAM_VERSION 无法解析: {build.UPSTREAM_VERSION!r}")
 
+    # 候选集跟着**当前 pin 所在的频道**走：pin 是预发布就跟预发布，
+    # pin 是正式版就只跟正式版（见文件头「跟不跟预发布」）。
+    allow_prerelease = cur[3] == 0
+    log(f" 频道: {'预发布（pin 是预发布，候选集也含预发布）' if allow_prerelease else '正式版'}")
+
     try:
-        latest = parse_ver(want) if want else max(upstream_versions(token))
+        latest = parse_ver(want) if want else max(upstream_versions(token, allow_prerelease))
     except Exception as e:
         # 取不到上游版本就是「这次检查失败」，但不能让它以 traceback 收场：
         # Actions 日志里一个 traceback 会被当成脚本 bug，而真实原因通常是

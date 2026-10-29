@@ -17,6 +17,13 @@ name: Check upstream and release
 # 某个架构的 .sha256 读不到时**硬失败**，绝不静默留旧值 —— 旧哈希配上新
 # 版本号，会在别人的机器上以「sha256 不符」的形式炸在 --fetch-binaries。
 #
+# ── 跟哪个频道（正式版 / 预发布）─────────────────────────────
+# 由 build.py 的 pin 自己决定，规则在 tools/bump_upstream.py 的
+# upstream_versions(allow_prerelease=cur[3] == 0) 里：pin 是正式版就只在正式版
+# 里挑候选；pin 是预发布（当前 3.3.0-beta.4 就是）就让预发布也进候选集，但只认
+# **带 Linux 官方包资产的 Release**（上游有只有 tag、没有资产的 v3.3.0-beta.5.1，
+# 选进来会让取 .sha256 硬失败）。上游发出 3.3.0 正式版后自动升过去，频道随之收回。
+#
 # ── 为什么是独立的 workflow，而不是往 build-and-release.yml 里塞一个 job ──
 # GitHub 有一条硬规则：**用内置 GITHUB_TOKEN 推送 tag，不会触发其它
 # workflow 运行**（防递归）。所以「定时检查 → push tag → 由 tag 触发构建」
