@@ -1,0 +1,235 @@
+name: Build upstream from tag (source)
+
+# 应急通道：**从上游 tag 源码**编 agent2api-server（aml64/arm64），不依赖官方 Release 资产。
+#
+# ── 为什么要这条 workflow ─────────────────────────────────────────
+# 2026-10-29 上游 v3.3.0-beta.5 的官方 Linux 包有个必崩 bug：headless 入口
+# `start_gateway()` 在**创建 Tokio 运行时之前**调用 `ServerState::bootstrap`
+# → `core::update::init_global` → 裸 `tokio::spawn`，release 是 panic=abort，
+# 进程当场退出（"there is no reactor running"）。真机表现就是应用起来就死。
+#
+# 上游已有 tag `v3.3.0-beta.5.1` 修掉它（改成 `crate::spawn_task`），但**还没发
+# Release 资产**（`releases/tags/v3.3.0-beta.5.1` 仍 404）。本仓库的 build.py
+# 只认官方包 sha256，所以这种情况下打不出包；这条 workflow 提供一条自编译的
+# 旁路，产物可直接替换 `bin/agent2api-server-linux-<arch>` 用于真机验证。
+#
+# ── 口径（和 v3.1.0 之前自编译阶段保持一致）──────────────────────
+#  · 只编 `-p agent2api-server`（网关本体）。桌面端 crate 在 Linux 下要
+#    webkit2gtk 一整套系统库，headless 一个都不用。
+#  · 跑在 **ubuntu-22.04**（glibc 2.35）上：飞牛 fnOS 1.2.x = Debian 12 = 2.36，
+#    在 24.04 上编出来的二进制会引用 GLIBC_2.38/2.39，装上去直接
+#    "version `GLIBC_2.38' not found"。arm64 走 aarch64 交叉编译，不进 QEMU。
+#  · `--locked`：依赖版本按上游 Cargo.lock，不现场解析。
+#  · 构建完必须过两道闸：ELF 架构 / 最高 GLIBC ≤ 2.36；以及 headless 冒烟
+#    （起得来、/health 通、日志里没有 "no reactor running"）。第二道就是
+#    为 beta.5 这类「编译通过、启动即崩」准备的 —— 只看文件大小和 ELF 头
+#    是发现不了的。
+#
+# 用法：Actions 页面手动 Run workflow（默认 v3.3.0-beta.5.1），产物在
+# artifact `upstream-from-tag-<tag>` 里，含两个架构的二进制 + sha256。
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "上游 tag（含 v 前缀，如 v3.3.0-beta.5.1）"
+        required: true
+        default: "v3.3.0-beta.5.1"
+      run_smoke:
+        description: "跑 headless 冒烟（/health + 无 panic）"
+        type: boolean
+        default: true
+  # 第一次推上来就自动跑一次，省得还要人去网页点；之后改文件同理。
+  push:
+    paths:
+      - ".github/workflows/build-upstream-from-tag.yml"
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: aimod-cc/Agent2API
+  SRC_DIR: .local-build/src-from-tag
+
+jobs:
+  build:
+    name: cargo build agent2api-server (both arches)
+    runs-on: ubuntu-22.04
+    # 冷编译约 10 分钟；给了缓存也要留足余量，别让超时把一次有效构建砍掉。
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.upstream_tag }}"
+          # push 触发时 inputs 是空的，回落到默认 tag
+          if [ -z "${TAG:-}" ]; then TAG="v3.3.0-beta.5.1"; fi
+          case "$TAG" in
+            v*) ;;
+            *) echo "ERROR: tag 必须以 v 开头: $TAG"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "上游 tag = $TAG"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      # arm64 需要 aarch64 的 C 工具链与 glibc 开发头文件 ——
+      # rusqlite 的 bundled SQLite 与 ring 的 C/汇编源码要用 C 编译器。
+      # libc6-dev-arm64-cross 只是 gcc-aarch64-linux-gnu 的 Recommends，
+      # --no-install-recommends 下必须显式列出，否则编 C 代码时会捡到
+      # 宿主的 /usr/include 头文件而报错。
+      - name: Install arm64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Fetch upstream source (tag)
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          mkdir -p "$SRC_DIR"
+          URL="https://codeload.github.com/${UPSTREAM_REPO}/tar.gz/refs/tags/${TAG}"
+          # 直连 + 两个加速源兜底（与本仓库 build.py 的下载通道同一套）
+          curl -fsSL --retry 3 --retry-delay 3 -m 300 "$URL" -o src.tar.gz \
+            || curl -fsSL --retry 3 -m 300 "https://v4.gh-proxy.org/$URL" -o src.tar.gz \
+            || curl -fsSL --retry 3 -m 300 "https://gh.dpik.top/$URL" -o src.tar.gz
+          tar -xzf src.tar.gz -C "$SRC_DIR" --strip-components=1
+          test -d "$SRC_DIR/desktop-tauri/src-tauri/server" || {
+            echo "ERROR: 源码结构变了（找不到 desktop-tauri/src-tauri/server）"; ls -l "$SRC_DIR"; exit 1; }
+
+          # tag 与 crate 版本自证：防「tag 被移动」或下载到别的分支
+          GOT=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$SRC_DIR/desktop-tauri/src-tauri/server/Cargo.toml" | head -1)
+          WANT="${{ steps.tag.outputs.ver }}"
+          echo "server crate version = $GOT（期望 $WANT）"
+          [ "$GOT" = "$WANT" ] || { echo "ERROR: Cargo.toml 版本与 tag 不一致"; exit 1; }
+
+      # 缓存 Rust 依赖：冷编译约 10 分钟，命中后只剩源码层重编。
+      # workspaces 的写法是 `$workspace -> $target`，$target 相对 $workspace。
+      # 这里与下面 --target-dir 的 ${GITHUB_WORKSPACE}/target 对齐：
+      # 从 src-tauri 往上四层就是仓库根。
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../target
+          key: upstream-${{ steps.tag.outputs.tag }}
+
+      - name: Build agent2api-server (Rust, both arches)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR/desktop-tauri/src-tauri"
+          BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
+          TGT="${GITHUB_WORKSPACE}/target"
+          mkdir -p "$BIN_DIR"
+
+          echo "==> agent2api-server linux/amd64 (native)"
+          cargo build --release --locked -p agent2api-server --target-dir "$TGT"
+          cp "$TGT/release/agent2api-server" "$BIN_DIR/agent2api-server-linux-amd64"
+
+          echo "==> agent2api-server linux/arm64 (cross)"
+          cargo build --release --locked -p agent2api-server \
+            --target aarch64-unknown-linux-gnu --target-dir "$TGT"
+          cp "$TGT/aarch64-unknown-linux-gnu/release/agent2api-server" \
+             "$BIN_DIR/agent2api-server-linux-arm64"
+
+          ls -l "$BIN_DIR"
+          ( cd "$BIN_DIR" && sha256sum agent2api-server-linux-* | tee SHA256SUMS.txt )
+
+      # 二进制自检：ELF 架构对不对、要求的 glibc 有没有超过飞牛的 2.36。
+      # 这两项错了都不会在构建期报错，只在真机上「装完起不来」。
+      - name: Verify binaries (arch + glibc)
+        run: |
+          set -euo pipefail
+          MAX_GLIBC=36   # 飞牛 fnOS 1.2.x = Debian 12 bookworm = glibc 2.36
+          python3 - <<PY
+          import re, sys, pathlib
+          max_minor = ${MAX_GLIBC}
+          want = {"agent2api-server-linux-amd64": 0x3E, "agent2api-server-linux-arm64": 0xB7}
+          bad = False
+          for name, machine in want.items():
+              p = pathlib.Path(".local-build/bin") / name
+              data = p.read_bytes()
+              if data[:4] != b"\x7fELF":
+                  print(f"ERROR {name}: 不是 ELF"); bad = True; continue
+              em = int.from_bytes(data[18:20], "little")
+              if em != machine:
+                  print(f"ERROR {name}: e_machine=0x{em:x}，期望 0x{machine:x}"); bad = True
+              vers = sorted({int(v) for v in re.findall(rb"GLIBC_2\.(\d+)", data)})
+              top = vers[-1] if vers else None
+              print(f"{name}: {p.stat().st_size:,} B  e_machine=0x{em:x}  max GLIBC_2.{top}")
+              if top is not None and top > max_minor:
+                  print(f"ERROR {name}: 需要 GLIBC_2.{top} > 飞牛上限 2.36"); bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      # headless 冒烟：beta.5 那种「编译通过、启动即崩」只有真跑一次才看得见。
+      # 判定标准有两条，缺一不可：
+      #   1) 进程能起来并且 /health 200（20 秒内）；
+      #   2) 日志里没有 "no reactor running"（beta.5 的 panic 原话）。
+      - name: Smoke test (headless, amd64)
+        if: ${{ inputs.run_smoke != false }}
+        run: |
+          set -uo pipefail
+          TMP=$(mktemp -d)
+          BIN="$GITHUB_WORKSPACE/.local-build/bin/agent2api-server-linux-amd64"
+          LOG="$TMP/out.log"
+
+          AGENT2API_PROXY_HOME="$TMP/data" \
+          AGENT2API_HOST=127.0.0.1 \
+          AGENT2API_PROXY_PORT=39999 \
+          AGENT2API_UI_DIR="$TMP/ui" \
+          AGENT2API_ALLOW_NO_KEY=1 \
+            "$BIN" > "$LOG" 2>&1 &
+          PID=$!
+
+          OK=0
+          for i in $(seq 1 20); do
+            if curl -fsS -m 2 http://127.0.0.1:39999/health >/dev/null 2>&1; then
+              OK=1; break
+            fi
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "进程在 /health 就绪前已退出"; break
+            fi
+            sleep 1
+          done
+
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          echo "===== 上游输出 ====="
+          cat "$LOG"
+          echo "===================="
+
+          if grep -q "no reactor running" "$LOG"; then
+            echo "ERROR: 命中 beta.5 的启动 panic（there is no reactor running）"
+            exit 1
+          fi
+          if [ "$OK" != "1" ]; then
+            echo "ERROR: /health 在 20 秒内未就绪"
+            exit 1
+          fi
+          echo "冒烟通过：headless 起得来，/health 200，无 reactor panic"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-from-tag-${{ steps.tag.outputs.tag }}
+          path: |
+            .local-build/bin/agent2api-server-linux-amd64
+            .local-build/bin/agent2api-server-linux-arm64
+            .local-build/bin/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
