@@ -1,0 +1,248 @@
+name: Build fpk (release if available, else from source)
+
+# 一条链路出 .fpk：**有官方 Release 就用官方包，没有就从上游 tag 源码构建**。
+#
+# ── 为什么需要它 ─────────────────────────────────────────────────
+# 现有的 build-and-release.yml 只走「官方 Release 资产」这一条路：`--fetch-binaries`
+# 下载 agent2api-server-linux-<arch>.tar.gz 并校验钉住的 sha256。上游发新版时这条路
+# 最省事，但遇到下面两种情况就没法出包：
+#   · 上游只打了 tag、还没发 Release 资产（2026-10-30 的 v3.3.0-beta.5.1 就是这样）；
+#   · 已发的资产本身是坏的（v3.3.0-beta.5 的 headless 二进制启动即 panic）。
+#
+# 所以这里做成分支：
+#   mode=release → 官方包（bump pin → --fetch-binaries → 打包），与现有 CI 等价；
+#   mode=source  → 从 tag 源码交叉编译二进制 + 从源码取面板 → 就地改 pin → 打包。
+# 判定依据只有一条：`releases/tags/<tag>` 是否 200。
+#
+# ── source 模式凭什么能过 build.py 的守卫 ────────────────────────
+# build.py 不信任"随便放的二进制"，它查三件事：
+#   1) 溯源 sidecar（`<bin>.sha256`）与文件本身一致 —— 我们自己写一份即可（自维护）；
+#   2) ELF 架构 / rustc 标记 / 体积下限 / glibc ≤ 2.36 —— ubuntu-22.04 + 交叉工具链满足；
+#   3) 上游面板树的哈希 == UPSTREAM_UI_SHA256 —— 面板来自源码，所以**必须重算并改写**
+#      build.py 里那个钉子，否则构建期直接报"面板形态可能已变"。
+# 第 3 条由 tools/rewrite_pin_for_source.py 负责：它调 build.py 自己的
+# `_upstream_ui_src()`（会先打 SW scope 补丁）再算树哈希，口径与
+# `verify_webui_provenance()` 完全一致；同时把 UPSTREAM_VERSION 改成目标 tag，
+# 免得日志/溯源说"集成的是 beta.4、实际编的是 beta.5.1"。
+#
+# 产物：artifact `fpk-<tag>`（两个架构的 .fpk + SHA256SUMS），以及二进制 artifact
+# `upstream-from-tag-<tag>`（便于单独替换真机上的 bin，不重装 fpk）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "上游 tag（含 v 前缀，如 v3.3.0-beta.5.1）"
+        required: true
+        default: "v3.3.0-beta.5.1"
+      force_source:
+        description: "即使有 Release 也用源码构建（验证/应急）"
+        type: boolean
+        default: false
+  # 本机没有 gh / PAT，推送即触发一次（inputs 为空时回落到 DEFAULT_TAG）。
+  # 改这个文件就会重跑；日常手动触发放 workflow_dispatch。
+  push:
+    paths:
+      - ".github/workflows/build-fpk-from-tag.yml"
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: aimod-cc/Agent2API
+  SRC_DIR: .local-build/src-from-tag
+
+jobs:
+  build:
+    name: build fpk
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve mode (release or source)
+        id: mode
+        env:
+          FORCE_SOURCE: ${{ inputs.force_source }}
+        run: |
+          set -euo pipefail
+          # push 触发时 inputs 全为空 → 回落到应急默认 tag（改这里即可换目标版本；
+          # 注意别写成"跟随 build.py 的 pin"，beta.5 那次 pin 指向的正是坏版本）
+          DEFAULT_TAG="v3.3.0-beta.5.1"
+          TAG="${{ inputs.upstream_tag }}"
+          if [ -z "${TAG:-}" ]; then TAG="$DEFAULT_TAG"; fi
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 30 \
+            -H "User-Agent: fnos-agent2api-ci" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/releases/tags/${TAG}")
+          echo "releases/tags/$TAG → HTTP $code"
+          if [ "$code" = "200" ] && [ "${FORCE_SOURCE:-false}" != "true" ]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "判定：上游有官方 Release 资产，走 release 模式"
+          else
+            echo "mode=source" >> "$GITHUB_OUTPUT"
+            echo "判定：上游没有可用的 Release 资产（或强制源码），走 source 模式"
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Setup Go (fngateway)
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+
+      # ── release 模式：官方包 ────────────────────────────────────
+      - name: release mode · bump pin from official release
+        if: steps.mode.outputs.mode == 'release'
+        run: |
+          set -euo pipefail
+          python3 tools/bump_upstream.py --apply --upstream-version "${{ steps.mode.outputs.ver }}"
+          python3 build.py --fetch-binaries
+
+      # ── source 模式：交叉编译 + 自造面板目录 ────────────────────
+      - name: source mode · setup Rust
+        if: steps.mode.outputs.mode == 'source'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: source mode · install arm64 cross toolchain
+        if: steps.mode.outputs.mode == 'source'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: source mode · fetch upstream source
+        if: steps.mode.outputs.mode == 'source'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.mode.outputs.tag }}"
+          mkdir -p "$SRC_DIR"
+          URL="https://codeload.github.com/${UPSTREAM_REPO}/tar.gz/refs/tags/${TAG}"
+          curl -fsSL --retry 3 --retry-delay 3 -m 300 "$URL" -o src.tar.gz \
+            || curl -fsSL --retry 3 -m 300 "https://v4.gh-proxy.org/$URL" -o src.tar.gz \
+            || curl -fsSL --retry 3 -m 300 "https://gh.dpik.top/$URL" -o src.tar.gz
+          tar -xzf src.tar.gz -C "$SRC_DIR" --strip-components=1
+          test -d "$SRC_DIR/desktop-tauri/ui" || { echo "ERROR: 源码里没有 desktop-tauri/ui"; exit 1; }
+
+          GOT=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$SRC_DIR/desktop-tauri/src-tauri/server/Cargo.toml" | head -1)
+          WANT="${{ steps.mode.outputs.ver }}"
+          echo "server crate version = $GOT（期望 $WANT）"
+          [ "$GOT" = "$WANT" ] || { echo "ERROR: tag 与 Cargo.toml 版本不一致"; exit 1; }
+
+      - name: source mode · cache Rust dependencies
+        if: steps.mode.outputs.mode == 'source'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../target
+          key: fpk-${{ steps.mode.outputs.tag }}
+
+      - name: source mode · cargo build (amd64 + arm64)
+        if: steps.mode.outputs.mode == 'source'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR/desktop-tauri/src-tauri"
+          BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
+          TGT="${GITHUB_WORKSPACE}/target"
+          mkdir -p "$BIN_DIR"
+
+          cargo build --release --locked -p agent2api-server --target-dir "$TGT"
+          cp "$TGT/release/agent2api-server" "$BIN_DIR/agent2api-server-linux-amd64"
+
+          cargo build --release --locked -p agent2api-server \
+            --target aarch64-unknown-linux-gnu --target-dir "$TGT"
+          cp "$TGT/aarch64-unknown-linux-gnu/release/agent2api-server" \
+             "$BIN_DIR/agent2api-server-linux-arm64"
+          ls -l "$BIN_DIR"
+
+      # source 模式下 build.py 的"上游面板"仍然从
+      # `.local-build/upstream-bundle-<arch>/ui/` 取（它认为那是官方包解包目录）。
+      # 我们就在这里**按官方包内布局**把这个目录造出来，并把二进制也放进去 ——
+      # 这样 stage_ui / check_webui / verify_fpk 都不需要改，走的仍是同一条组装路径。
+      - name: source mode · materialize bundle dir + rewrite pin
+        if: steps.mode.outputs.mode == 'source'
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            D=".local-build/upstream-bundle-$arch"
+            rm -rf "$D"; mkdir -p "$D/ui"
+            cp -a "$SRC_DIR/desktop-tauri/ui/." "$D/ui/"
+            cp ".local-build/bin/agent2api-server-linux-$arch" "$D/agent2api-server"
+          done
+
+          # 二进制溯源 sidecar：fetch_server_bundle() 也是这么写的（<sha>  <name>）。
+          # build.py 的 check_binaries() 会拿它复查"这个二进制确实是从刚校验过的包来的"，
+          # 缺了只警告、写错了硬失败 —— 我们既然是自己编的，就自己给出真实的 hash。
+          ( cd .local-build/bin
+            for arch in amd64 arm64; do
+              sha256sum "agent2api-server-linux-$arch" > "agent2api-server-linux-$arch.sha256"
+            done
+            cat agent2api-server-linux-*.sha256 )
+
+          APP_VER="${{ steps.mode.outputs.ver }}-1"
+          python3 tools/rewrite_pin_for_source.py \
+            --tag "${{ steps.mode.outputs.tag }}" --app-version "$APP_VER"
+          grep -n '^version\|^changelog' manifest | cut -c1-200
+
+      # ── 两条模式汇合：编 fngateway → 打包 ──────────────────────
+      - name: Build fngateway (Go, both arches)
+        run: |
+          set -euo pipefail
+          APP_VERSION=$(sed -n 's/^version\s*=\s*//p' manifest | head -1 | tr -d ' \r')
+          echo "APP_VERSION=$APP_VERSION"
+          cd fngateway
+          mkdir -p ../.local-build/bin
+          export CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=mod
+          for arch in amd64 arm64; do
+            echo "==> fngateway linux/$arch"
+            GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${APP_VERSION}" \
+              -o "../.local-build/bin/fngateway-linux-${arch}" .
+            ls -l "../.local-build/bin/fngateway-linux-${arch}"
+          done
+
+      - name: Build fpk (build.py, both arches)
+        run: |
+          set -euo pipefail
+          python3 build.py --arch all
+          ls -l agent2api-*.fpk
+          sha256sum agent2api-*.fpk | tee SHA256SUMS.txt
+
+      - name: Upload fpk
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ steps.mode.outputs.tag }}
+          path: |
+            agent2api-*.fpk
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-from-tag-${{ steps.mode.outputs.tag }}
+          path: |
+            .local-build/bin/agent2api-server-linux-amd64
+            .local-build/bin/agent2api-server-linux-arm64
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Show pin diff (审计用)
+        if: always()
+        run: |
+          git --no-pager diff --stat || true
+          git --no-pager diff -- build.py manifest | head -80 || true
