@@ -180,7 +180,10 @@ jobs:
       #   1) 进程能起来并且 /health 200（20 秒内）；
       #   2) 日志里没有 "no reactor running"（beta.5 的 panic 原话）。
       - name: Smoke test (headless, amd64)
-        if: ${{ inputs.run_smoke != false }}
+        # 注意：push 触发时 `inputs` 整个是空的，写 `inputs.run_smoke != false`
+        # 会被求值成 false 而**静默 skip**（2026-10-30 第一次跑就踩了，产物
+        # 没冒烟就上传了）。所以按事件类型分开判：push 一律跑，手动触发才看开关。
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}
         run: |
           set -uo pipefail
           TMP=$(mktemp -d)
