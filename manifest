@@ -14,7 +14,7 @@ source                = thirdparty
 maintainer            = Agent2API
 maintainer_url        = https://github.com/aimod-cc/Agent2API
 
-distributor           = sushazhi
+distributor           = yukihana
 distributor_url       = https://github.com/sushazhi/fnos-agent2api
 
 # 安装控制

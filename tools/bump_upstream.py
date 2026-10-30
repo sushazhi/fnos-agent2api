@@ -496,11 +496,17 @@ def bump_manifest(upstream_tag, app_version):
 
     # 上游版本号必须跟着走：manifest.version 的 x.y.z 段是给人看的「集成了哪个
     # 上游」，与 build.py 的 pin 脱钩会得到「包名说 2.10 实际编的是 2.9」。
+    # 模板刻意保持两条、只回答「这一版集成了哪个上游 tag」+「这行字是谁写的」：
+    #   · 「面板副本与上游 tag 逐字节一致」是**构建期守卫**（verify_webui_provenance）
+    #     管的事，写进更新日志既改变不了它，也在面板没变的那一版变成废话；
+    #   · 「重新编译 Linux 双架构二进制」自 v3.1.0 起已不成立 —— 二进制与面板
+    #     都取自上游官方包（build.py --fetch-binaries），本仓库不再编 Rust。
+    # 条目越短，应用中心与 Release notes 里越不会被折叠；要再加细节就人工改
+    # manifest 里这一版已发布的说明（旧版说明不再被覆盖）。
     new_entry = (
         f"v{app_version}<br>"
-        f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动），面板副本与上游 tag 逐字节一致<br>"
-        f"2.重新编译 Linux 双架构二进制（amd64 / arm64），glibc 上限仍低于飞牛 fnOS 的 2.36<br>"
-        f"3.本条目由 GitHub Actions 定时检查上游后自动生成"
+        f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动）<br>"
+        f"2.本条目由 GitHub Actions 定时检查上游后自动生成"
     )
     m = re.search(r"(?m)^changelog\s*=\s*(.*)$", text)
     if not m:

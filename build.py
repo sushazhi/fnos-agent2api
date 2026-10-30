@@ -452,9 +452,12 @@ def check_text_hygiene():
     """
     problems = []
     checked = 0
+    # `target/` 是 Cargo 的产物目录（2026-10-30 起 source 模式构建也会落在仓库里）：
+    # 里面全是 .json / .timestamp / .d 这类由编译器写出的文本，既不受本仓库控制，
+    # 也不进包。不排除它 → 一次 `cargo build` 之后打包直接报上千项「末尾缺换行」。
     for dirpath, dirnames, filenames in os.walk(PROJECT_DIR):
         dirnames[:] = [d for d in dirnames
-                       if d not in {".git", ".local-build", "__pycache__", "tools"}]
+                       if d not in {".git", ".local-build", "__pycache__", "tools", "target"}]
         for fn in sorted(filenames):
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, PROJECT_DIR).replace(os.sep, "/")

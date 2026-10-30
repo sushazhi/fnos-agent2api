@@ -143,7 +143,7 @@ jobs:
         if: steps.mode.outputs.mode == 'source'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../target
+          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../.local-build/target
           key: fpk-${{ steps.mode.outputs.tag }}
 
       - name: source mode · cargo build (amd64 + arm64)
@@ -156,7 +156,10 @@ jobs:
           set -euo pipefail
           cd "$SRC_DIR/desktop-tauri/src-tauri"
           BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
-          TGT="${GITHUB_WORKSPACE}/target"
+          # 产物目录放 .local-build/（已被 build.py 的文本卫生与打包扫描排除），
+          # 不要落在仓库根 —— 那里的 target/ 会被当成待检文本，一次 cargo build
+          # 就能让 check_text_hygiene() 报上千项「末尾缺换行」。
+          TGT="${GITHUB_WORKSPACE}/.local-build/target"
           mkdir -p "$BIN_DIR"
 
           cargo build --release --locked -p agent2api-server --target-dir "$TGT"
