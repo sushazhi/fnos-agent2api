@@ -120,7 +120,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../target
+          workspaces: .local-build/src-from-tag/desktop-tauri/src-tauri -> ../../../../.local-build/target
           key: upstream-${{ steps.tag.outputs.tag }}
 
       - name: Build agent2api-server (Rust, both arches)
@@ -132,7 +132,7 @@ jobs:
           set -euo pipefail
           cd "$SRC_DIR/desktop-tauri/src-tauri"
           BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
-          TGT="${GITHUB_WORKSPACE}/target"
+          TGT="${GITHUB_WORKSPACE}/.local-build/target"
           mkdir -p "$BIN_DIR"
 
           echo "==> agent2api-server linux/amd64 (native)"
