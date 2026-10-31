@@ -99,7 +99,7 @@ APP_NAME = "agent2api"
 #  v3.0.8，而 3.0.8 < 3.3.0-beta.4 恒成立，于是每天判定「已是最新」，
 #  beta.5 根本进不了候选集 —— 就是「Actions 检查不到上游更新」的真因。）
 UPSTREAM_REPO = "aimod-cc/Agent2API"
-UPSTREAM_VERSION = "3.3.0-beta.5"
+UPSTREAM_VERSION = "3.3.0-beta.6"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
@@ -146,8 +146,8 @@ UPSTREAM_URLS = (
 # 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
 UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
 UPSTREAM_BUNDLE_SHA256 = {
-    "amd64": "d2bcab8979d008e0997289dd6f39c2a2a2fd706349f9b080c1edf26b3a8c8158",
-    "arm64": "ec57d2184917e465c176efddaaced5fd2f13faaa9040ee773c367789a5044d0c",
+    "amd64": "9830748fdc71515d473c4a8241880b70d3ea01840d22a18af6f488b7e26997c8",
+    "arm64": "ededbf84e5207e4905b953a57cecffecc55659c224305904b621462b730fae43",
 }
 # 包内二进制名（解包后即叫这个名，无需改名）与包内 UI 目录名。
 UPSTREAM_BUNDLE_BIN = "agent2api-server"
@@ -177,13 +177,13 @@ def bundle_urls(arch):
     )
 
 
-# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 232 个文件，排除本项目自己
+# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 233 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
 #
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "cb3db2900c8feb63ec4836733cbb103c6ded8d639363cc5109bd3cfc97d76e4a"
+UPSTREAM_UI_SHA256 = "0b1720c4221c4198a0ae2e468a65c3cf7a0bb96e8417138ce05755d9714f6d5d"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 #

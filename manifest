@@ -1,5 +1,5 @@
 appname               = agent2api
-version               = 3.3.0-beta.5-1
+version               = 3.3.0-beta.6-1
 display_name          = Agent2API
 desc                  = <b>多提供商账号池 → OpenAI 兼容 API 网关</b>（基于上游 agent2api v3.3.0-beta.4 预发布版（新增 OpenAI Images 接口）），内置官方 Web 控制台与手机端页面；单文件静态二进制，<b>无需 Docker、无需 Node 运行时</b>，安装即用。<br><br>🤖 <b>账号池 → 标准 API：</b><br>- 标准 <code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/messages</code>、<code>/v1/models</code><br>- 图片生成与参考图编辑（OpenAI Images 接口，图片模型独立进模型目录）<br>- 多账号轮转、失败重试，本地 SQLite 持久化<br>- 内置 WorkBuddy、小浣熊（Raccoon）、CatPaw、AutoClaw、Qoder、Cline、Trae、ZCode、CodeArts、智谱清言等多家适配，另支持自定义提供商<br><br>🖥️ <b>官方控制台（v3.3.0-beta.4 面板，218 个文件）：</b><br>- 账号管理、模型中心、API 密钥、运行日志、请求报表、定时任务、余额查询、对话测试台<br>- 界面支持简体中文、繁體中文、English、日本語、한국어、Português (BR) 六种语言（简体中文以「中文即键」的基准文案承载）<br>- 手机端入口 <code>/m</code>，并提供 PWA 资源（<code>manifest.webmanifest</code> + <code>sw.js</code>；经网关子路径运行时「添加到主屏」受限，见项目说明）<br>- 统一网关接入，复用飞牛登录态，<b>面板无需独立登录密码</b>，仅管理员可访问<br><br>🔌 <b>下游接入：</b><br>- 独立端口 <code>http://＜飞牛IP＞:3065/v1</code>，任意 OpenAI SDK 直连（统一网关路径仅供面板访问，外部客户端走不通）<br><br>🧩 <b>运行时与许可：</b><br>- 上游为 Rust 静态二进制，要求 glibc ≥ 2.34（实测引用的最高 GLIBC 符号版本），飞牛 fnOS 1.2.x 为 2.36，满足；<b>不依赖应用中心 Node.js 运行时</b><br>- SQLite 以 bundled 方式静态链接，运行时无额外系统依赖<br>- ⚠️ <b>上游自 v3.3.0-beta.2 起改用 AGPL-3.0</b>（此前为 MIT + 使用声明）：本包内置的上游二进制与面板受 AGPL-3.0 约束，许可全文随包（LICENSE.upstream），对应源码可自上游仓库 aimod-cc/Agent2API 获取，详见包内 UPSTREAM.txt<br>- 账号凭据在应用数据目录中以明文存储，请勿在多人共享设备上使用
 
@@ -29,4 +29,4 @@ desktop_uidir         = ui
 desktop_applaunchname = agent2api.Application
 
 # 更新日志
-changelog             = v3.3.0-beta.5-1<br>1.上游 agent2api v3.3.0-beta.5 原样集成（零源码改动），面板副本与上游 tag 逐字节一致<br>2.重新编译 Linux 双架构二进制（amd64 / arm64），glibc 上限仍低于飞牛 fnOS 的 2.36<br>3.本条目由 GitHub Actions 定时检查上游后自动生成
+changelog             = v3.3.0-beta.6-1<br>1.上游 agent2api v3.3.0-beta.6 原样集成（零源码改动）<br>2.本条目由 GitHub Actions 定时检查上游后自动生成
