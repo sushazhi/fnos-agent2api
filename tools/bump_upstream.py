@@ -4,17 +4,18 @@
 为什么需要这个脚本
 ------------------
 本仓库只做飞牛适配层，上游源码不入库。上游发版很快，每次升级都要同时改动
-**五个互相耦合的位置**，漏掉任何一处都会在构建期硬失败：
+**几个互相耦合的位置**，漏掉任何一处都会在构建期硬失败：
 
   1. build.py  UPSTREAM_VERSION         —— 决定 UPSTREAM_TAG 与下载地址
-  2. build.py  UPSTREAM_BUNDLE_SHA256   —— 官方 Linux 服务端包的 sha256（每架构一个）
-  3. build.py  UPSTREAM_UI_SHA256       —— 面板副本的树哈希（上游改一个字节就变）
-  4. manifest  version                  —— 上游版本-N（预发布时为 x.y.z-pre-N），
+  2. build.py  UPSTREAM_BUNDLE_MODE     —— 产物形态：release（官方包）/ source（tag 源码自编）
+  3. build.py  UPSTREAM_BUNDLE_SHA256   —— 官方 Linux 服务端包的 sha256（每架构一个，release 模式）
+  4. build.py  UPSTREAM_UI_SHA256       —— 面板树的哈希（上游改一个字节就变）
+  5. manifest  version                  —— 上游版本-N（预发布时为 x.y.z-pre-N），
                                             其中上游版本段必须等于 build.py 的 pin
-  5. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
+  6. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
 
-人工做这几步既繁琐又容易漏 —— 尤其第 2、3 项：两个哈希都得先下载上游产物、
-跑完同步才知道。本脚本把「查上游 → 改 pin → 取包内 sha256 → 同步面板 →
+人工做这几步既繁琐又容易漏 —— 尤其第 3、4 项：两个哈希都得先下载上游产物、
+跑完同步才知道。本脚本把「查上游 → 改 pin → 定模式 → 取包内 sha256 → 同步面板 →
 重算哈希 → 改 manifest → 跑守卫」串成一步，供 GitHub Actions 每天自动
 执行，也可以本地手动跑。
 
@@ -29,10 +30,26 @@ README §8 与 docs/upstream-candidates.md 记录了取舍：适配层刻意**�
 等价于「改几个数字 / 哈希」，而不是「合并上游 diff」。这个脚本就是那几个数字的
 搬运工。
 
-注意：二进制本身**不再由本仓库编译**。v3.1.0 起上游官方发布 Linux 服务端包
-（agent2api-server-linux-<arch>.tar.gz），本仓库只钉住它的 sha256，构建时由
-build.py 的 fetch_server_bundle() 下载并校验。所以这里第 2 项改的不是「编译
-参数」而是「上游产物的指纹」—— 它由上游的 .sha256 资产原样搬过来。
+产物形态由**上游有没有发官方包**决定（2026-10-31 起）
+----------------------------------------------------
+上游的发布习惯并不稳定，实测存在**只打了 tag、没有 Release 资产**的版本
+（v3.3.0-beta.5.1：tag 在，releases 里没有它）。旧行为是「这类版本不算可跟进的
+版本」，于是它永远拿不到包；现在改成两条路都走：
+
+  · tag 的 Release 带两个架构的官方包 + .sha256 → UPSTREAM_BUNDLE_MODE=release，
+    第 3 项按上游 .sha256 资产重新钉哈希（原行为不变）；
+  · 没有官方包（或根本没发 Release）→ UPSTREAM_BUNDLE_MODE=source，第 3 项
+    **不动**（没有包可比，构建期也不看它），二进制的产出交给
+    .github/workflows/build-and-release.yml 的 cargo 步骤（ubuntu-22.04 +
+    aarch64 交叉工具链，glibc ≤ 2.36），面板仍按第 4 项从该 tag 源码重算。
+
+两种模式的产物都发布到本仓库的 Release，所以「上游发了什么」与「我们能装什么」
+不再脱钩。
+
+注意：二进制本身**不再由本仓库编译**（source 模式除外）。v3.1.0 起上游官方发布
+Linux 服务端包（agent2api-server-linux-<arch>.tar.gz），本仓库只钉住它的
+sha256，构建时由 build.py 的 fetch_server_bundle() 下载并校验。所以这里第 3 项
+改的不是「编译参数」而是「上游产物的指纹」—— 它由上游的 .sha256 资产原样搬过来。
 
 用法
 ----
@@ -40,9 +57,12 @@ build.py 的 fetch_server_bundle() 下载并校验。所以这里第 2 项改的
     python tools/bump_upstream.py --apply         # 检查并应用（版本取自上游）
     python tools/bump_upstream.py --apply --upstream-version 3.2.0
     python tools/bump_upstream.py --apply --force # 上游无新版本也重算一遍
+    python tools/bump_upstream.py --apply --force --force-source
+        # 应急：官方包装得上但跑不起来（或想核对源码构建）时，把这一版钉成
+        # source 走自编。覆盖结果会写进 build.py 并随提交进入 git，可审计。
 
-在 GitHub Actions 里会把结果写进 $GITHUB_OUTPUT（update / upstream_version /
-current_upstream_version / app_version / tag），供后续 job 使用。
+在 GitHub Actions 里会把结果写进 $GITHUB_OUTPUT（update / newer / mode /
+upstream_version / current_upstream_version / app_version / tag），供后续 job 使用。
 """
 import importlib
 import importlib.util
@@ -50,6 +70,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -78,6 +99,12 @@ import build  # noqa: E402  （要放在 sys.path 调整之后）
 # 之后就成了死锁：上游正式版线停在 v3.0.8，而 3.0.8 < 3.3.0-beta.4 恒成立，
 # 于是每天判定「已是最新」，连 v3.3.0-beta.5（2026-10-29 发布）都进不了候选集，
 # 表现就是「GitHub Actions 检查不到上游更新」。
+#
+# 2026-10-31 起，候选集**不再过滤「没有官方包资产」的 tag**：那个过滤器是
+# 2026-10-30 为绕开 v3.3.0-beta.5.1（有 tag、无 Release）临时加的，代价是
+# 「上游发了什么」与「我们能装什么」脱钩 —— 有修复的版本永远拿不到包。现在
+# 这类版本照常进候选集，改由产物形态（release / source）决定二进制怎么来，
+# 见文件头「产物形态由上游有没有发官方包决定」。
 #
 # 表示法：正式版 → (major, minor, patch, 1, ())；预发布 →
 # (major, minor, patch, 0, ((类, 段), …))。于是 3.2.0-beta.2 < 3.2.0，
@@ -148,14 +175,11 @@ def release_assets(rel):
 def has_bundle_assets(names):
     """Release 里是否齐了「两个架构的 Linux 官方包 + 各自的 .sha256」。
 
-    这条只对**预发布**候选生效（见 upstream_versions）：上游存在只有 tag、
-    没有 Release 的标签 —— 实测 v3.3.0-beta.5.1 就是这样（tag 在，releases
-    里没有它）。把它当成候选，fetch_bundle_sha256() 会在取 .sha256 时拿到 404
-    并硬失败，整个 job 红掉；按「没有资产就不算一个可跟进的版本」跳过它，
-    下一个真实版本（v3.3.0-beta.5）照常跟进。
-
-    正式版**不**加这条限制：上游从 v3.1.0 才开始发官方 Linux 包，更早的正式版
-    （v2.x、v3.0.x）本来就没有这些资产，套上它会把这些版本从候选集里误删。
+    只用来回答「这个 tag 的产物能不能走 release 模式」。注意**不能**拿它当
+    「算不算一个可跟进的版本」：上游从 v3.1.0 才开始发官方 Linux 包，更早的
+    正式版（v2.x、v3.0.x）本来就没有这些资产；而 v3.3.0-beta.5.1 这类「有 tag、
+    没资产」的版本恰恰带着上游的修复。没有资产时走 source 模式（tag 源码自编），
+    不是跳过。
     """
     for arch in ("amd64", "arm64"):
         asset = build.UPSTREAM_BUNDLE_ASSET.format(arch=arch)
@@ -164,16 +188,36 @@ def has_bundle_assets(names):
     return True
 
 
+def bundle_available(upstream_tag, token=None):
+    """该 tag 的 Release 里有没有可用的官方包（决定 release / source 模式）。
+
+    三种结果分得很清，因为「判错模式」的后果是静默的 —— 会把一个本来该用官方包
+    的版本编成源码构建：
+
+      · Release 存在且两个架构的包 + .sha256 齐全 → True；
+      · 404（这个 tag 没发 Release，实测 v3.3.0-beta.5.1）→ False，走 source；
+      · 其它错误（限流 / 网络 / 仓库迁址）→ **抛出去**，让本次检查失败重来。
+        绝不能把它当成「没有官方包」：那会安静地把产物形态改成源码自编。
+    """
+    try:
+        rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/tags/{upstream_tag}", token)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log(f"  [提示] 上游 {upstream_tag} 没有 Release（只有 tag）—— 走 source 模式")
+            return False
+        raise RuntimeError(f"读取上游 Release {upstream_tag} 失败（HTTP {e.code}）") from e
+    return has_bundle_assets(release_assets(rel))
+
+
 def upstream_versions(token=None, allow_prerelease=False):
     """列出上游候选版本号（allow_prerelease 见文件头「跟不跟预发布」）。
 
     tags 是权威来源 —— 本仓库升级的是「上游 tag 对应的那份产物」。
-    releases 只用来回答一个问题：这个 tag 有没有可下载的官方包。
+    releases 只用来在日志里说明「哪些候选没有官方包」（那些会走 source 模式）。
     releases/latest 作兜底（万一上游先发 Release 后补 tag）。
     """
     found = set()
     released = {}   # 版本 -> 该版本的 Release 是否带完整官方包资产
-    skipped = []    # 只记日志用：没有资产而被跳过的预发布 tag
 
     for page in (1, 2):
         try:
@@ -205,15 +249,8 @@ def upstream_versions(token=None, allow_prerelease=False):
             v = parse_ver(t.get("name", ""))
             if not v:
                 continue
-            if v[3] == 1:
-                found.add(v)          # 正式版：一直如此
-            elif allow_prerelease:
-                if released.get(v):
-                    found.add(v)      # 预发布且带官方包资产：可跟
-                elif v not in skipped:
-                    skipped.append(v)
-                    log(f"  [提示] 跳过预发布 {ver_str(v)}："
-                        "没有带 Linux 官方包资产的 Release（只有 tag）")
+            if v[3] == 1 or allow_prerelease:
+                found.add(v)
 
     try:
         rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/latest", token)
@@ -228,12 +265,21 @@ def upstream_versions(token=None, allow_prerelease=False):
             f"{'（含预发布）' if allow_prerelease else ''}版本号"
             "（仓库迁址 / API 限流 / 网络？）"
         )
+    # 只记日志：候选里有几个缺官方包（它们在构建时会走 source 模式）。
+    # 正式版在更早的 v2.x/v3.0.x 时期本来就没有官方包，所以这里只对
+    # 「releases 里登记过但资产不齐」与「tag 完全没进 releases」做说明，
+    # 不做任何过滤。
+    no_bundle = sorted(v for v in found if not released.get(v))
+    if no_bundle:
+        log("  [提示] 以下候选没有官方 Linux 包资产，构建时将走 source 模式（tag 源码自编）："
+            + ", ".join(ver_str(v) for v in no_bundle[:6])
+            + (" …" if len(no_bundle) > 6 else ""))
     return found
 
 
 # ---------------------------------------------------------------------------
-# build.py 的改写（UPSTREAM_VERSION / UPSTREAM_BUNDLE_SHA256 / UPSTREAM_UI_SHA256
-# + 哈希上方的文件数）
+# build.py 的改写（UPSTREAM_VERSION / UPSTREAM_BUNDLE_MODE /
+# UPSTREAM_BUNDLE_SHA256 / UPSTREAM_UI_SHA256 + 哈希上方的文件数）
 # ---------------------------------------------------------------------------
 
 def rewrite_pin(upstream_version):
@@ -247,6 +293,34 @@ def rewrite_pin(upstream_version):
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(new)
     log(f"  build.py: UPSTREAM_VERSION = {upstream_version}")
+
+
+def rewrite_bundle_mode(mode):
+    """把 build.py 的 UPSTREAM_BUNDLE_MODE 改成 release / source。
+
+    这个开关决定 build.py 从哪里取上游产物（官方包 vs tag 源码），进而决定 CI
+    要不要装 Rust 工具链。它是「跟随上游现状」的值：某个 tag 后来补发了官方包，
+    下次检查就会把它从 source 翻回 release（见 main() 里 --force 的用法）。
+    """
+    if mode not in (build.UPSTREAM_MODE_RELEASE, build.UPSTREAM_MODE_SOURCE):
+        raise RuntimeError(f"未知的产物形态 {mode!r}")
+    path = os.path.join(PROJECT_DIR, "build.py")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    new, n = re.subn(r'(?m)^UPSTREAM_BUNDLE_MODE\s*=\s*"[^"]*"',
+                     f'UPSTREAM_BUNDLE_MODE = "{mode}"', text)
+    if n != 1:
+        raise RuntimeError(
+            f"build.py 里 UPSTREAM_BUNDLE_MODE 匹配到 {n} 处，应为 1 处"
+            "（常量被改名/删除了？请同步更新 bump_upstream.rewrite_bundle_mode）"
+        )
+    if new != text:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new)
+        log(f"  build.py: UPSTREAM_BUNDLE_MODE = {mode}")
+    else:
+        log(f"  build.py: UPSTREAM_BUNDLE_MODE 已是 {mode}")
+    return mode
 
 
 BUNDLE_SHA_RE_CACHE = {}
@@ -480,13 +554,17 @@ def set_manifest_key(text, key, value):
     return "".join(lines)
 
 
-def bump_manifest(upstream_tag, app_version):
+def bump_manifest(upstream_tag, app_version, mode=build.UPSTREAM_MODE_RELEASE):
     """把 manifest 的 version / changelog 改到位。
 
     版本号已经是目标值时**不动 changelog** —— 这样 `--force` 就是纯粹的
     「按当前版本重打一次包」，不会每次重跑都往 changelog 里塞重复条目。
 
     changelog **只保留最新一版**：有新版本时整段覆盖，不再把旧条目累加在后面。
+
+    mode 影响说明的第 2 条：release 模式二进制来自上游官方包，source 模式是
+    本流水线用该 tag 源码交叉编译的 —— 这属于「装的是什么」的关键事实，不能
+    让两部分别说成同一件事（用户看到「官方包」却装了个自编二进制，等于溯源失真）。
     """
     text = read_manifest()
     cur = manifest_version(text)
@@ -496,16 +574,22 @@ def bump_manifest(upstream_tag, app_version):
 
     # 上游版本号必须跟着走：manifest.version 的 x.y.z 段是给人看的「集成了哪个
     # 上游」，与 build.py 的 pin 脱钩会得到「包名说 2.10 实际编的是 2.9」。
-    # 模板刻意保持两条、只回答「这一版集成了哪个上游 tag」+「这行字是谁写的」：
+    # 模板刻意保持两条、只回答「这一版集成了哪个上游 tag（以及二进制怎么来的）」
+    # +「这行字是谁写的」：
     #   · 「面板副本与上游 tag 逐字节一致」是**构建期守卫**（verify_webui_provenance）
     #     管的事，写进更新日志既改变不了它，也在面板没变的那一版变成废话；
-    #   · 「重新编译 Linux 双架构二进制」自 v3.1.0 起已不成立 —— 二进制与面板
-    #     都取自上游官方包（build.py --fetch-binaries），本仓库不再编 Rust。
+    #   · 二进制来源两种模式下不同（官方包 / tag 源码交叉编译），必须分开写。
     # 条目越短，应用中心与 Release notes 里越不会被折叠；要再加细节就人工改
     # manifest 里这一版已发布的说明（旧版说明不再被覆盖）。
+    if mode == build.UPSTREAM_MODE_SOURCE:
+        origin = (f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动），该 tag 未发官方"
+                  f" Linux 包，二进制由其源码交叉编译（ubuntu-22.04，glibc 上限 2.36）、"
+                  f"面板取自同一 tag<br>")
+    else:
+        origin = f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动），二进制与面板取自上游官方 Linux 服务端包<br>"
     new_entry = (
         f"v{app_version}<br>"
-        f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动）<br>"
+        + origin +
         f"2.本条目由 GitHub Actions 定时检查上游后自动生成"
     )
     m = re.search(r"(?m)^changelog\s*=\s*(.*)$", text)
@@ -599,9 +683,33 @@ def main():
         f"{'（--force 仍重打一次）' if force and not newer else ''}")
     log(f" 目标: 上游 {upstream_tag} → 应用版本 {app_version}")
 
+    # 产物形态由**上游发没发官方包**决定：发了就用官方包（release），没发就从
+    # 该 tag 源码编（source）。这里查不出来（限流/网络）时直接失败，绝不默认
+    # 成 source —— 那会把一个本该用官方包的版本安静地编成源码构建。
+    #
+    # 两个 --force-* 是应急覆盖：官方包装得上但跑不起来时（实测 v3.3.0-beta.5
+    # 的 headless 二进制启动即 panic），可以主动把它钉成 source 走自编；反之
+    # 官方包补发之后也能手动切回 release。覆盖结果同样写进 git，所以「这一版
+    # 为什么没用官方包」在提交历史里看得见。
+    override = ""
+    if "--force-source" in args:
+        override = build.UPSTREAM_MODE_SOURCE
+    elif "--force-release" in args:
+        override = build.UPSTREAM_MODE_RELEASE
+    if override:
+        log(f" 产物形态被 --force-{'source' if override == build.UPSTREAM_MODE_SOURCE else 'release'} 覆盖")
+        mode = override
+    else:
+        mode = (build.UPSTREAM_MODE_RELEASE if bundle_available(upstream_tag, token)
+                else build.UPSTREAM_MODE_SOURCE)
+    log(f" 产物形态: {mode}"
+        + ("（上游有官方 Linux 服务端包）" if mode == build.UPSTREAM_MODE_RELEASE
+           else "（上游没有官方包，二进制将由 tag 源码交叉编译）"))
+
     emit_outputs({
         "update": "true" if update else "false",
         "newer": "true" if newer else "false",
+        "mode": mode,
         "upstream_version": target_up,
         "current_upstream_version": build.UPSTREAM_VERSION,
         "upstream_tag": upstream_tag,
@@ -615,24 +723,35 @@ def main():
         return
 
     log("")
-    log("[1/6] 改 build.py 的上游 pin ...")
+    log("[1/6] 改 build.py 的上游 pin 与产物形态 ...")
     if newer:
         rewrite_pin(target_up)
-        load_build()
     else:
         log("  （--force：上游无新版本，pin 不变）")
-
-    # 二进制包 sha256 跟着版本走：新版就有新包、新指纹。--force 且版本未变时
-    # 也重搬一次（上游可能悄悄换了资产），这正好让「重新钉一次」变得可审计。
-    log("[2/6] 取上游官方服务端包的 sha256 并写入 build.py ...")
-    bundle_hashes = fetch_bundle_hashes(upstream_tag, token)
-    if bundle_hashes == dict(getattr(build, "UPSTREAM_BUNDLE_SHA256", {}) or {}):
-        log("  与旧哈希一致（上游包未变）")
-    rewrite_bundle_hashes(bundle_hashes)
+    rewrite_bundle_mode(mode)
     load_build()
 
-    log("[3/6] 拉上游源码 + 同步面板 ...")
-    build.fetch_upstream()
+    # 官方包 sha256 只在 release 模式有意义：source 模式没有包可比，硬取 .sha256
+    # 只会 404。--force 且版本未变时也重搬一次（上游可能悄悄换了资产），这正好
+    # 让「重新钉一次」变得可审计。
+    bundle_hashes = {}
+    if mode == build.UPSTREAM_MODE_RELEASE:
+        log("[2/6] 取上游官方服务端包的 sha256 并写入 build.py ...")
+        bundle_hashes = fetch_bundle_hashes(upstream_tag, token)
+        if bundle_hashes == dict(getattr(build, "UPSTREAM_BUNDLE_SHA256", {}) or {}):
+            log("  与旧哈希一致（上游包未变）")
+        rewrite_bundle_hashes(bundle_hashes)
+        load_build()
+    else:
+        log("[2/6] source 模式：不钉官方包 sha256（该 tag 没有官方包）")
+        log("      build.py 里保留的旧值在 source 模式下不参与任何判定")
+
+    log("[3/6] 拉上游源码 + 就位面板来源 ...")
+    # 两种模式都先确保源码树 == 当前 pin：release 模式用它自证 tag 没被移动，
+    # source 模式它还是面板与（CI 侧）二进制的来源。
+    build.ensure_source_tree()
+    for arch in ("amd64", "arm64"):
+        build.fetch_server_bundle(arch)
     build.sync_webui()
 
     log("[4/6] 重算面板树哈希 ...")
@@ -646,7 +765,7 @@ def main():
 
     log("[5/6] 面板溯源复核 + 改 manifest（version + changelog）...")
     build.verify_webui_provenance()
-    text, changed = bump_manifest(upstream_tag, app_version)
+    text, changed = bump_manifest(upstream_tag, app_version, mode)
     write_manifest(text)
     load_build()
 
@@ -663,6 +782,9 @@ def main():
     if build.UPSTREAM_TAG != upstream_tag:
         raise SystemExit(f"ERROR: 改完后 UPSTREAM_TAG={build.UPSTREAM_TAG!r}"
                          f" != {upstream_tag!r}（它应由 UPSTREAM_VERSION 派生）")
+    if build.upstream_mode() != mode:
+        raise SystemExit(f"ERROR: 改完后 UPSTREAM_BUNDLE_MODE={build.UPSTREAM_BUNDLE_MODE!r}"
+                         f" != {mode!r}（.pyc 缓存未失效，或正则失配）")
     got_bundle = dict(getattr(build, "UPSTREAM_BUNDLE_SHA256", {}) or {})
     for arch, want in bundle_hashes.items():
         if got_bundle.get(arch) != want:
