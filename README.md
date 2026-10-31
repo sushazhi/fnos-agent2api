@@ -45,15 +45,17 @@ OpenAI SDK ──http──> http://<飞牛IP>:3065/v1 ────────�
 
 ### 2.1 前置条件与命令
 
-不需要 Rust / WSL / Docker —— 上游自己发官方 Linux 服务端包，CI 不再交叉编译。只需 Go ≥ 1.27（纯标准库）、Python ≥ 3.8、`fnpack`（自动下载）。glibc：上游要 ≥ 2.34，飞牛 2.36，满足。
+不需要 Rust / WSL / Docker —— 上游多数版本自己发官方 Linux 服务端包，CI 直接取包；只在上游**没发**官方包时才就地交叉编译（见 §2.3）。本机只需要 Go ≥ 1.27（纯标准库）、Python ≥ 3.8、`fnpack`（自动下载）。glibc：上游要 ≥ 2.34，飞牛 2.36，满足。
 
 ```powershell
 pwsh -File fngateway\build.ps1 -Version 3.3.0-beta.4-1   # 出 fngateway 双架构
-python build.py --fetch-binaries                 # 落盘官方包（面板不入库，必须先跑）
+python build.py --print-mode                     # 看这一版走 release 还是 source（见 §2.3）
+python build.py --fetch-binaries                 # 落盘上游产物（面板不入库，必须先跑）
+python build.py --fetch-source                   # source 模式：只拉 tag 源码（编二进制前用）
 python build.py --check                          # 全量预检（不联网、不打包）
 python build.py [--arch arm64] [--version X]     # 出 fpk
-python build.py --sync-upstream [--materialize-ui]  # 解包+核对溯源；需要人工 diff 才写 app/ui
-python tools\bump_upstream.py --detect|--apply   # 改齐四处 pin + manifest
+python build.py --sync-upstream [--materialize-ui]  # 取产物+核对溯源；需要人工 diff 才写 app/ui
+python tools\bump_upstream.py --detect|--apply    # 改齐几处 pin + manifest（含产物形态）
 cd fngateway; go vet ./...; go test ./...        # 37 个测试
 ```
 
@@ -61,15 +63,26 @@ cd fngateway; go vet ./...; go test ./...        # 37 个测试
 
 ### 2.2 面板注入
 
-`app/ui/` 只留 `config` 与 `images/`，213 个面板文件不进仓库；`stage_ui()` 组装时从 `.local-build/upstream-bundle-<arch>/ui/` 拷入（先跑 `patch_sw_scope`）。好处是仓库/stage/fpk 三份副本不再漂移，代价是**上游改面板不再出现在 `git diff` 里**，只靠树哈希探针 + 解包目录 `diff -rq` 发现。缺失官方包时 `build.py` fail-fast，不会产出错包，但也就打不出包。
+`app/ui/` 只留 `config` 与 `images/`，232 个面板文件不进仓库；`stage_ui()` 组装时从 `.local-build/upstream-bundle-<arch>/ui/` 拷入（先跑 `patch_sw_scope`）。这个目录在两种产物形态下都由 `fetch_server_bundle()` 填好：release 模式解官方包，source 模式把 tag 源码的 `desktop-tauri/ui` 按同一布局拷进去 —— 下游组装与自检因此完全同形。好处是仓库/stage/fpk 三份副本不再漂移，代价是**上游改面板不再出现在 `git diff` 里**，只靠树哈希探针 + 解包目录 `diff -rq` 发现。取不到上游产物时 `build.py` fail-fast，不会产出错包，但也就打不出包。
 
-### 2.3 CI
+### 2.3 CI：有官方包用官方包，没有就从源码编
 
-`check-upstream.yml` 每天 03:23 UTC 查新版 → 改 pin+manifest → 打 tag → `gh workflow run` **派发**构建；`build-and-release.yml` 取包（校验 sha256）→ 编 fngateway → 出 fpk → 发 Release。用派发而非 push tag，是因为 `GITHUB_TOKEN` 推的 tag 不会触发其它 workflow，否则版本永远没有 Release。二进制 job 留在 `ubuntu-22.04`（glibc 2.35 < 2.36，24.04 的 2.39 会炸），并用 `readelf` 断言上游包 glibc 不超 2.36。fpk 不可逐字节复现（`fnpack` tar 元数据带 mtime/uid），本地与 CI 哈希不同不是 bug。
+两条 workflow，一条链路出包：
+
+`check-upstream.yml` 每天 03:23 UTC 查新版 → 定产物形态 → 改 pin+manifest → 打 tag → `gh workflow run` **派发**构建；`build-and-release.yml` 取上游产物 → 编 fngateway → 出 fpk → 发 Release。用派发而非 push tag，是因为 `GITHUB_TOKEN` 推的 tag 不会触发其它 workflow，否则版本永远没有 Release。
+
+产物形态由「上游该 tag 有没有发官方 Linux 服务端包」决定，结果写进 `build.py` 的 `UPSTREAM_BUNDLE_MODE` 并随提交进入 git（所以「这一版为什么是自编的」在历史里可审计；下游只问 `build.py --print-mode`）：
+
+| 形态 | 触发条件 | 二进制 | 面板 | 官方包 sha256 |
+| --- | --- | --- | --- | --- |
+| `release` | Release 里有 `agent2api-server-linux-<arch>.tar.gz` + `.sha256` | 下载官方包并校验钉住的 sha256 | 官方包内 `ui/` | 每次升级重新钉 |
+| `source` | 只打了 tag、没发资产（如 v3.3.0-beta.5.1） | CI 就地 `cargo build --release --locked -p agent2api-server`，amd64 原生 + arm64 交叉 | 同 tag 的 `desktop-tauri/ui` | 不动（没有包可比） |
+
+两种模式都发布本仓库的 `.fpk` Release —— 上游「发了什么」与「我们能装什么」不脱钩。另外两条守卫针对这条链路的真实事故：**启动冒烟**（起得来 + `/health` 200 + 日志无 `no reactor running`，专抓 v3.3.0-beta.5 那种「编译通过、启动即崩」）与**glibc 断言**（`readelf`/`objdump` 验 ≤ 2.36）。二进制 job 留在 `ubuntu-22.04`（glibc 2.35 < 2.36；24.04 的 2.39 会让自编产物在飞牛上报 `GLIBC_2.38 not found`）。应急开关：官方包装得上但跑不起来时，跑 `tools/bump_upstream.py --apply --force --force-source`（或派发 `check-upstream.yml` 勾 `force_source`）把这一版钉成源码构建。fpk 不可逐字节复现（`fnpack` tar 元数据带 mtime/uid），本地与 CI 哈希不同不是 bug。
 
 ### 2.4 构建期守卫
 
-「编译能过、真机才炸」的静默缺陷一律做成硬失败：文本卫生（CRLF/BOM）、manifest 取值里的 `;`、图标缺失、面板缺文件/根绝对路径/提供商图标缺失、面板树哈希漂移、上游版本不符、官方包与 bin sidecar 溯源不符、四处契约不一致、二进制架构与替身检测、打包后解包复核（ELF/可执行位/权限/manifest 逐值）、workflow 静态错误、`bump_upstream.py` 改完仍读到旧常量（CPython 只按 mtime 整秒 + 字节数判 `.pyc`）。
+「编译能过、真机才炸」的静默缺陷一律做成硬失败：文本卫生（CRLF/BOM）、manifest 取值里的 `;`、图标缺失、面板缺文件/根绝对路径/提供商图标缺失、面板树哈希漂移、上游版本不符、上游二进制与 bin sidecar 溯源不符（release 模式来自官方包，source 模式由本流水线自编）、四处契约不一致、二进制架构与替身检测、打包后解包复核（ELF/可执行位/权限/manifest 逐值）、workflow 静态错误、`bump_upstream.py` 改完仍读到旧常量（CPython 只按 mtime 整秒 + 字节数判 `.pyc`）。
 
 ## 3. 安装与使用
 

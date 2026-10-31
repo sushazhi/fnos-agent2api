@@ -11,8 +11,8 @@ name: Check upstream and release
 # build.py 的 UPSTREAM_REPO 提供；本文件不重复它，以免两处不同步。
 #
 # v3.1.0 起上游官方发布 Linux 服务端包
-# （agent2api-server-linux-<arch>.tar.gz + 同名 .sha256），所以一次升级要
-# 搬的值比过去多一个：UPSTREAM_BUNDLE_SHA256 的两个架构哈希。这部分也由
+# （agent2api-server-linux-<arch>.tar.gz + 同名 .sha256），所以一次升级多数时候
+# 还要搬一个值：UPSTREAM_BUNDLE_SHA256 的两个架构哈希。这部分也由
 # tools/bump_upstream.py 负责（它去读上游 Release 的 .sha256 资产）。
 # 某个架构的 .sha256 读不到时**硬失败**，绝不静默留旧值 —— 旧哈希配上新
 # 版本号，会在别人的机器上以「sha256 不符」的形式炸在 --fetch-binaries。
@@ -20,9 +20,19 @@ name: Check upstream and release
 # ── 跟哪个频道（正式版 / 预发布）─────────────────────────────
 # 由 build.py 的 pin 自己决定，规则在 tools/bump_upstream.py 的
 # upstream_versions(allow_prerelease=cur[3] == 0) 里：pin 是正式版就只在正式版
-# 里挑候选；pin 是预发布（当前 3.3.0-beta.4 就是）就让预发布也进候选集，但只认
-# **带 Linux 官方包资产的 Release**（上游有只有 tag、没有资产的 v3.3.0-beta.5.1，
-# 选进来会让取 .sha256 硬失败）。上游发出 3.3.0 正式版后自动升过去，频道随之收回。
+# 里挑候选；pin 是预发布（当前 3.3.0-beta.5 就是）就让预发布也进候选集。
+# 上游发出 3.3.0 正式版后自动升过去，频道随之收回。
+#
+# ── 产物形态（2026-10-31 起）─────────────────────────────────
+# 候选集**不再**要求「必须有 Linux 官方包资产」。上游存在只打 tag、没发 Release
+# 的版本（实测 v3.3.0-beta.5.1：tag 在，releases 里没有它），旧规则会把这类
+# 版本直接跳过 —— 于是带修复的版本永远拿不到包。现在这类版本照常跟进，
+# 只是产物形态变成 source：二进制由 build-and-release.yml 的就地 cargo 步骤从
+# 该 tag 源码交叉编译，面板从同 tag 源码取，两个架构的 sha256 则**不动**
+# （没有包可比）。判定与写入都发生在 bump 里（bump_upstream.bundle_available），
+# 结果写进 build.py 的 UPSTREAM_BUNDLE_MODE 并随提交进入 git，所以「这一版是
+# 官方包还是自编」在历史里可审计；下游 workflow 只问 `build.py --print-mode`。
+# 查不出「有没有官方包」（限流/网络）时 bump **直接失败**，不会默认成 source。
 #
 # ── 为什么是独立的 workflow，而不是往 build-and-release.yml 里塞一个 job ──
 # GitHub 有一条硬规则：**用内置 GITHUB_TOKEN 推送 tag，不会触发其它
@@ -43,6 +53,8 @@ name: Check upstream and release
 # 本 workflow **只跑 Python + git + 网络请求**，不产二进制、不碰 Rust/Go，
 # 所以与 build-and-release.yml 的 binaries job 没有任何步骤耦合：那边删掉
 # Rust 工具链 / 交叉工具链 / rust-cache 之后，这里不受影响（也不需要跟着改）。
+# source 模式下这里会多下载一份上游 tag 源码（面板的来源），仍然不需要任何
+# 编译工具链 —— 编 Rust 只发生在 binaries job。
 #
 # ── 为什么直接提交到 main，而不是开 PR ────────────────────────
 # 需求是「每天自动跟进上游」。开 PR 会卡在人工合并上，自动化的意义就没了。
@@ -79,6 +91,10 @@ on:
         description: '上游无新版本时也重打一次当前版本（用于验证流水线）'
         type: boolean
         default: false
+      force_source:
+        description: '应急：强制这一版用源码构建（官方包装得上但跑不起来时用）'
+        type: boolean
+        default: false
 
 permissions:
   # 提交 + 打 tag（Release 由 build-and-release.yml 建，那边也有 contents: write）
@@ -100,6 +116,7 @@ jobs:
     outputs:
       update: ${{ steps.check.outputs.update }}
       newer: ${{ steps.check.outputs.newer }}
+      mode: ${{ steps.check.outputs.mode }}
       tag: ${{ steps.check.outputs.tag }}
       app_version: ${{ steps.check.outputs.app_version }}
       upstream_tag: ${{ steps.check.outputs.upstream_tag }}
@@ -128,20 +145,23 @@ jobs:
       - name: Self-check bump/reload consistency
         run: python3 tools/check_bump_reload.py
 
-      # 把「查上游 → 改 pin → 重钉官方包 sha256 → 同步面板 → 重算树哈希 →
-      # 改 manifest → 跑构建期守卫」一次做完。守卫不过会非零退出，后面的提交
-      # 就不会发生。逻辑放在 tools/bump_upstream.py 里而不是写进 YAML，是为了
-      # 本地能直接复现、能单测（README §3.5 的手工升级步骤已被这一步取代）。
+      # 把「查上游 → 定产物形态 → 改 pin → 重钉官方包 sha256 → 同步面板 →
+      # 重算树哈希 → 改 manifest → 跑构建期守卫」一次做完。守卫不过会非零退出，
+      # 后面的提交就不会发生。逻辑放在 tools/bump_upstream.py 里而不是写进 YAML，
+      # 是为了本地能直接复现、能单测（README §3.5 的手工升级步骤已被这一步取代）。
       #
-      # 这一步需要联网：既要查 GitHub API，也要下载上游官方包（同步面板用）
-      # 和两个 <asset>.sha256 资产。任一架构的 .sha256 取不到就硬失败，
-      # 不会带着旧哈希往下走（见文件头）。
+      # 这一步需要联网：查 GitHub API、拉上游 tag 源码（自证 tag + 源码模式下面板
+      # 的来源）；release 模式还要下载上游官方包与两个 <asset>.sha256 资产。
+      # release 模式下任一架构的 .sha256 取不到就硬失败，不会带着旧哈希往下走；
+      # 连「该 tag 有没有官方包」都查不出来时也直接失败（见文件头），绝不默认
+      # 成 source 模式 —— 那会把本该用官方包的版本安静地编成自编二进制。
       - name: Check upstream, bump pins and manifest
         id: check
         env:
           # 只用于抬高 GitHub API 的限流额度（匿名 60 次/小时）
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ inputs.force }}
+          FORCE_SOURCE: ${{ inputs.force_source }}
           # 纵深防御：不写 __pycache__ 就没有陈旧 .pyc 可被复用。load_build()
           # 本身已经不再依赖这一点（它会删 .pyc 并直接 exec 源码），但多一层
           # 保险没有代价 —— 这个 job 只跑一次，省下编译缓存没有意义。
@@ -152,6 +172,10 @@ jobs:
           if [ "${FORCE:-false}" = "true" ]; then
             echo "workflow_dispatch 指定 force=true —— 即使上游无新版本也重打一次"
             args+=(--force)
+          fi
+          if [ "${FORCE_SOURCE:-false}" = "true" ]; then
+            echo "workflow_dispatch 指定 force_source=true —— 这一版强制走源码构建"
+            args+=(--force-source)
           fi
           python3 tools/bump_upstream.py "${args[@]}"
 
@@ -245,6 +269,7 @@ jobs:
         env:
           UPDATE: ${{ steps.check.outputs.update }}
           NEWER: ${{ steps.check.outputs.newer }}
+          MODE: ${{ steps.check.outputs.mode }}
           UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
           APP_VERSION: ${{ steps.check.outputs.app_version }}
           TAG: ${{ steps.check.outputs.tag }}
@@ -257,6 +282,7 @@ jobs:
             echo "| 上游有更新 | \`${NEWER:-n/a}\` |"
             echo "| 需要构建 | \`${UPDATE:-n/a}\` |"
             echo "| 上游 tag | \`${UPSTREAM_TAG:-n/a}\` |"
+            echo "| 产物形态 | \`${MODE:-n/a}\` |"
             echo "| 应用版本 | \`${APP_VERSION:-n/a}\` |"
             echo "| 发布 tag | \`${TAG:-n/a}\` |"
           } >> $GITHUB_STEP_SUMMARY

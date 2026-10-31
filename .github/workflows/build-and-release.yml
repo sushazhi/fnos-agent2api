@@ -16,32 +16,41 @@ name: Build and Release Agent2API for fnOS
 # 本地开发不必装 Rust —— 二进制由上游发布，用 `python build.py --fetch-binaries`
 # 拉到 .local-build/bin/ 即可（CI 走的是同一条路径）。
 #
-# ── 二进制怎么来的（2026-10 起）──────────────────────────────
-# 上游仓库迁过两次（aimod-cc/agent2api → Agent2API/agent2api → 2026-10-24
-# 迁回 **aimod-cc/Agent2API**），并且 v3.1.0 起
-# **官方发布 Linux 服务端包**：
-#   agent2api-server-linux-<arch>.tar.gz        （二进制 + ui/ + install.sh …）
-#   agent2api-server-linux-<arch>.tar.gz.sha256 （sha256sum 格式）
-# 于是「拉源码 → 装 Rust → 交叉编译 server crate」整条路都没有必要了：
-# 本 job 改为 `python build.py --fetch-binaries`，由 build.py 负责
-# 下载（GitHub 直连 + 两个镜像兜底）→ 按 build.py 里**钉死的**
-# UPSTREAM_BUNDLE_SHA256 校验 → 解包 → 落到 .local-build/bin/。
+# ── 二进制怎么来的（2026-10-31 起：两种模式）──────────────────
+# 上游发版有两种形态，本 workflow 都覆盖，两种都出 .fpk 并发布到 Release：
+#
+#   mode=release（默认）：上游 Release 带官方 Linux 服务端包
+#     agent2api-server-linux-<arch>.tar.gz + 同名 .sha256
+#     → `python build.py --fetch-binaries` 下载（GitHub 直连 + 两个加速源兜底）
+#       → 按 build.py 里钉死的 UPSTREAM_BUNDLE_SHA256 校验 → 解包落 .local-build/bin/
+#
+#   mode=source：上游只打了 tag、没发 Release 资产（实测 v3.3.0-beta.5.1：
+#     tag 在、releases 里没有它）
+#     → 本 job 就地编译：cargo build --release --locked -p agent2api-server，
+#       amd64 原生 + arm64 交叉（ubuntu-22.04 + gcc-aarch64-linux-gnu），
+#       产物落 .local-build/bin/；面板由 build.py 从同一 tag 源码就位。
+#
+# 模式由 build.py 的 UPSTREAM_BUNDLE_MODE 决定（tools/bump_upstream.py 升级时按
+# 「该 tag 有没有官方包资产」写入并提交），本 workflow 只问一次：
+#     python3 build.py --print-mode
+# Rust 工具链**只在 source 模式**安装，release 模式的耗时不变。
 #
 # 失败模式（都在 build.py 里硬失败，不会产出一个错包）：
-#   · 上游删/换资产（404）→ 三个地址都失败 → 退出 1
-#   · 上游重新上传了同 tag 的包（sha256 不符）→ 拒绝使用并删除坏包 → 退出 1
-#     （这时要人工核对后跑 tools/bump_upstream.py --apply 重新钉哈希）
-#   · 包内缺二进制或缺 ui/ → 退出 1
+#   · release 模式：上游删/换资产（三个地址都 404，或 sha256 不符）→ 退出 1
+#     （sha256 不符说明上游重新上传了同 tag 的包：这时要人工核对后跑
+#      tools/bump_upstream.py --apply 重新钉哈希）
+#   · source 模式：源码结构与预期不符 / Cargo.toml 版本与 tag 不一致 → 退出 1
+#   · 两种模式：包内缺二进制或缺 ui/ → 退出 1
 #
 # ── 为什么仍然钉 ubuntu-22.04 ─────────────────────────────────
-# 上游包的 glibc 约束与 runner 无关（二进制是上游编的，实测最高引用 GLIBC_2.34，
-# 低于飞牛 Debian 12 的 2.36）。但**fngateway 是本 job 就地编的 Go 程序**，
-# 若将来被改成动态链接（关掉 CGO_ENABLED=0），runner 的 glibc 就会决定产物的
-# 最低要求。钉住 22.04 + 下面的 glibc 断言，把这种漂移变成构建期硬失败：
+# fngateway 是本 job 就地编的 Go 程序（CGO_ENABLED=0，纯静态，与 glibc 无关），
+# 但 **source 模式的 agent2api-server 是本 job 就地编的 Rust 程序**，它的 glibc
+# 下限完全由 runner 决定；release 模式下则是上游编的（实测最高引用 GLIBC_2.34）。
+# 两种都低于飞牛 Debian 12 的 2.36，但漂移必须能被看见：
 #   ubuntu-22.04 → glibc 2.35   ✅ 低于 2.36，安全
-#   ubuntu-24.04 → glibc 2.39   ❌ 若产物改为动态链接会在飞牛上
+#   ubuntu-24.04 → glibc 2.39   ❌ 产物会在飞牛上报
 #                                  "version `GLIBC_2.38' not found"
-# 这个坑不会在构建期报错，只在真机启动时炸，所以保留 Verify binaries 这道断言。
+# 这个坑不会在构建期报错，只在真机启动时炸，所以保留 Verify binaries 那道断言。
 # package job 不产二进制，跑在 ubuntu-24.04 上无所谓。
 #
 # ── 触发方式 ──────────────────────────────────────────────────
@@ -89,10 +98,12 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
-  # ── 取上游官方二进制 + 编 fngateway（amd64 + arm64）──────────
+  # ── 取上游产物（官方包或 tag 源码自编）+ 编 fngateway（amd64 + arm64）──
   binaries:
     name: Fetch upstream binaries + build fngateway
     runs-on: ubuntu-22.04
+    # source 模式冷编译 Rust 约 10 分钟；给缓存留足余量，别让超时砍掉一次有效构建。
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -121,25 +132,100 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 取上游 **官方** 服务端包，不再自己编 Rust。
-      #
-      # 这一步做三件事（都在 build.py 里，本地可复现）：
-      #   1. 按 build.py 的 bundle_urls(arch) 下载（GitHub 直连 + v4.gh-proxy.org
-      #      + gh.dpik.top 两个加速源兜底；选型依据见 build.py 头部 GH_PROXY
-      #      处的实测记录 —— v4 与 gh-proxy.com 实为同源故只留一个，
-      #      ghfast.top 长连接会卡死故撤掉，gh.dpik.top 是唯一异构兜底）；
-      #   2. 校验 build.py 里**钉死**的 UPSTREAM_BUNDLE_SHA256[arch] ——
-      #      不符即硬失败并删掉坏包（防止下一次被缓存复用掩盖问题）。
-      #      上游若重新上传了同 tag 的资产，就会出现这一步失败；此时不要
-      #      「放宽校验」，应人工核对后跑 tools/bump_upstream.py --apply
-      #      重新钉哈希（它会把两个架构的 sha256 一起改写）；
-      #   3. 解包并把二进制复制成 .local-build/bin/agent2api-server-linux-<arch>
-      #      （fngateway 的 startChild() 与 build.py 的 bin_paths() 都按这个名找）。
-      #
-      # 最后执行 check_binaries()：ELF + 架构 + rustc 标记 + 体积下限
-      # + glibc ≤ 2.36。--force-upstream 不在 CI 用：runner 每次都是干净的，
-      # 没有缓存需要绕过。
-      - name: Fetch upstream server bundles (sha256 pinned)
+      # 先问产物形态：Rust 工具链只在 source 模式装，release 模式一行都不多跑。
+      # 这个值来自仓库里提交的 build.py 常量（bump_upstream.py 升级时写入），
+      # 不是本 workflow 现场判断的 —— 保证「包是怎么来的」在 git 历史里可审计。
+      - name: Resolve upstream mode (release or source)
+        id: mode
+        run: |
+          set -euo pipefail
+          MODE=$(python3 build.py --print-mode)
+          case "$MODE" in
+            release|source) ;;
+            *) echo "ERROR: build.py --print-mode 返回了意外值: $MODE"; exit 1 ;;
+          esac
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          if [ "$MODE" = "source" ]; then
+            echo "上游该 tag 没有官方 Linux 包 —— 本 job 将用 tag 源码交叉编译 agent2api-server"
+          else
+            echo "上游该 tag 有官方 Linux 包 —— 直接下载并校验钉住的 sha256"
+          fi
+
+      # ── source 模式：拉源码 + 交叉编译 agent2api-server ──────────
+      # arm64 需要 aarch64 的 C 工具链与 glibc 开发头文件 —— rusqlite 的
+      # bundled SQLite 与 ring 的 C/汇编源码要用 C 编译器。libc6-dev-arm64-cross
+      # 只是 gcc-aarch64-linux-gnu 的 Recommends，--no-install-recommends 下必须
+      # 显式列出，否则编 C 代码时会捡到宿主的 /usr/include 头文件而报错。
+      - name: source mode · setup Rust
+        if: steps.mode.outputs.mode == 'source'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: source mode · install arm64 cross toolchain
+        if: steps.mode.outputs.mode == 'source'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          aarch64-linux-gnu-gcc --version | head -1
+
+      # 源码落 .local-build/upstream-src/（build.py 的 fetch_upstream 决定），
+      # 并核对 Cargo.toml 版本 == 当前 pin（防 tag 被移动或镜像给了旧包）。
+      - name: source mode · fetch upstream source
+        if: steps.mode.outputs.mode == 'source'
+        run: python3 build.py --fetch-source
+
+      # 缓存 Rust 依赖：冷编译约 10 分钟，命中后只剩源码层重编。
+      # workspaces 的写法是 `$workspace -> $target`，$target 相对 $workspace；
+      # 从 src-tauri 往上四层就是仓库根。
+      - name: source mode · cache Rust dependencies
+        if: steps.mode.outputs.mode == 'source'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .local-build/upstream-src/desktop-tauri/src-tauri -> ../../../../.local-build/target
+          key: upstream-${{ github.ref_name }}
+
+      # --locked：依赖版本按上游 Cargo.lock，不现场解析。
+      # 产物目录放 .local-build/（已被 build.py 的文本卫生与打包扫描排除），
+      # 不要落在仓库根 —— 那里的 target/ 会被当成待检文本，一次 cargo build
+      # 就能让 check_text_hygiene() 报上千项「末尾缺换行」。
+      - name: source mode · cargo build agent2api-server (both arches)
+        if: steps.mode.outputs.mode == 'source'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: |
+          set -euo pipefail
+          cd .local-build/upstream-src/desktop-tauri/src-tauri
+          BIN_DIR="${GITHUB_WORKSPACE}/.local-build/bin"
+          TGT="${GITHUB_WORKSPACE}/.local-build/target"
+          mkdir -p "$BIN_DIR"
+
+          echo "==> agent2api-server linux/amd64 (native)"
+          cargo build --release --locked -p agent2api-server --target-dir "$TGT"
+          cp "$TGT/release/agent2api-server" "$BIN_DIR/agent2api-server-linux-amd64"
+
+          echo "==> agent2api-server linux/arm64 (cross)"
+          cargo build --release --locked -p agent2api-server \
+            --target aarch64-unknown-linux-gnu --target-dir "$TGT"
+          cp "$TGT/aarch64-unknown-linux-gnu/release/agent2api-server" \
+             "$BIN_DIR/agent2api-server-linux-arm64"
+          ls -l "$BIN_DIR"
+
+      # ── 两种模式汇合：就位上游产物 ──────────────────────────────
+      # build.py 按 UPSTREAM_BUNDLE_MODE 分流：
+      #   release → 下载官方包（GitHub 直连 + v4.gh-proxy.org + gh.dpik.top 兜底），
+      #             校验 build.py 里钉死的 UPSTREAM_BUNDLE_SHA256，不符即硬失败并
+      #             删掉坏包（防止下次被缓存复用掩盖问题）；解包后把二进制复制成
+      #             .local-build/bin/agent2api-server-linux-<arch>（fngateway 的
+      #             startChild() 与 build.py 的 bin_paths() 都按这个名字找）；
+      #   source  → 从 tag 源码把面板按官方包布局就位到
+      #             .local-build/upstream-bundle-<arch>/ui/，并给刚编好的二进制
+      #             写出溯源 sidecar。两种来源在下游完全同形。
+      # --force-upstream 不在 CI 用：runner 每次都是干净的，没有缓存需要绕过。
+      - name: Fetch upstream server bundles (mode-aware)
         run: python3 build.py --fetch-binaries
 
       - name: Build fngateway (Go, both arches)
@@ -159,12 +245,14 @@ jobs:
       # 这两项错了都不会在构建期报错，只在真机上「装完起不来」。
       #
       # build.py 的 check_binaries() 已经查了一遍，这里**故意再查一遍**：
-      #   · 上游包是 CI 里唯一的外部二进制来源，一份独立的、不依赖 build.py
-      #     实现的断言，能在 build.py 被人改坏时仍然兜住；
+      #   · agent2api-server 是 CI 里唯一的外部/自编关键二进制，一份独立的、
+      #     不依赖 build.py 实现的断言，能在 build.py 被人改坏时仍然兜住；
       #   · 它同时覆盖本 job 自己编的 fngateway（build.py 的 glibc 检查
       #     对两个二进制都做，但这里用的是系统 readelf/objdump，独立实现）。
       # 开销只有几秒。
       - name: Verify binaries (arch + glibc)
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -e
           MAX_GLIBC="2.36"   # 飞牛 fnOS 1.2.x = Debian 12 bookworm
@@ -204,7 +292,7 @@ jobs:
                   echo "ERROR: ${name} 未见 rustc 标记，疑似占位/替身二进制"; fail=1
                 fi
                 if [ "$(stat -c%s "$bin")" -lt 8000000 ]; then
-                  echo "ERROR: ${name} 仅 $(stat -c%s "$bin") B，远小于上游官方包内的二进制（约 12~14 MB）"
+                  echo "ERROR: ${name} 仅 $(stat -c%s "$bin") B，远小于真实产物（约 12~14 MB）"
                   fail=1
                 fi
               fi
@@ -220,9 +308,14 @@ jobs:
                 echo "ERROR: ${name} 要求 ${worst} > 允许的 GLIBC_${MAX_GLIBC}"
                 echo "       飞牛 fnOS 上会报 \"version \`${worst#GLIBC_}' not found\"。"
                 if [ "${name#agent2api-server}" != "$name" ]; then
-                  echo "       这是上游官方包里的二进制 —— 说明上游提高了 glibc 基线。"
-                  echo "       请人工确认飞牛是否已跟进（Debian 13 = glibc 2.41），"
-                  echo "       或暂缓升级并回报上游。"
+                  if [ "${MODE:-release}" = "source" ]; then
+                    echo "       这是本 job 用 tag 源码交叉编译的产物 —— glibc 基线由 runner"
+                    echo "       镜像决定，请确认本 job 仍钉在 ubuntu-22.04（见文件头注释）。"
+                  else
+                    echo "       这是上游官方包里的二进制 —— 说明上游提高了 glibc 基线。"
+                    echo "       请人工确认飞牛是否已跟进（Debian 13 = glibc 2.41），"
+                    echo "       或暂缓升级并回报上游。"
+                  fi
                 else
                   echo "       请把本 job 的 runner 换回更低 glibc 的镜像（见文件头注释）。"
                 fi
@@ -233,6 +326,58 @@ jobs:
             done
           done
           exit $fail
+
+      # 启动冒烟：只看 ELF 头、体积、glibc 是发现不了「编译通过、启动即崩」的
+      # —— 上游 v3.3.0-beta.5 就是这样：headless 入口在创建 Tokio 运行时之前
+      # 裸 tokio::spawn，release 是 panic=abort，进程当场退出
+      # （"there is no reactor running"），真机表现是「应用起来就死」。
+      # source 模式下这条更关键：二进制是本 job 自己编的，语法/链接都对也不代表
+      # 跑得起来。只跑 amd64 —— arm64 是交叉编译产物，这里没有 qemu。
+      # 判定两条，缺一不可：
+      #   1) 进程能起来并且 /health 200（20 秒内）；
+      #   2) 日志里没有 "no reactor running"（beta.5 的 panic 原话）。
+      - name: Smoke test (headless, amd64)
+        run: |
+          set -uo pipefail
+          TMP=$(mktemp -d)
+          BIN="$GITHUB_WORKSPACE/.local-build/bin/agent2api-server-linux-amd64"
+          LOG="$TMP/out.log"
+
+          AGENT2API_PROXY_HOME="$TMP/data" \
+          AGENT2API_HOST=127.0.0.1 \
+          AGENT2API_PROXY_PORT=39999 \
+          AGENT2API_UI_DIR="$TMP/ui" \
+          AGENT2API_ALLOW_NO_KEY=1 \
+            "$BIN" > "$LOG" 2>&1 &
+          PID=$!
+
+          OK=0
+          for i in $(seq 1 20); do
+            if curl -fsS -m 2 http://127.0.0.1:39999/health >/dev/null 2>&1; then
+              OK=1; break
+            fi
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "进程在 /health 就绪前已退出"; break
+            fi
+            sleep 1
+          done
+
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          echo "===== 上游输出 ====="
+          cat "$LOG"
+          echo "===================="
+
+          if grep -q "no reactor running" "$LOG"; then
+            echo "ERROR: 命中 v3.3.0-beta.5 那类启动 panic（there is no reactor running）"
+            exit 1
+          fi
+          if [ "$OK" != "1" ]; then
+            echo "ERROR: /health 在 20 秒内未就绪"
+            exit 1
+          fi
+          echo "冒烟通过：headless 起得来，/health 200，无 reactor panic"
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
@@ -266,6 +411,15 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 只为了在 Summary 里写明「这一版二进制是官方包还是自编」——
+      # 交付物本身已经把这个事实写在包内 UPSTREAM.txt 里，这里只是让它显眼。
+      - name: Resolve upstream mode (for summary)
+        id: mode
+        run: |
+          MODE=$(python3 build.py --print-mode)
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "上游产物形态: $MODE"
+
       - name: Download binaries
         uses: actions/download-artifact@v8
         with:
@@ -284,15 +438,17 @@ jobs:
           chmod +x .local-build/tools/fnpack
           echo "fnpack downloaded ($(stat -c%s .local-build/tools/fnpack) bytes)"
 
-      # 用上游**官方包**里的 ui/ 刷新 app/ui → 跑全部预检。
-      # （v3.1.0 起面板与二进制同出自官方包；它包内的 ui/ 与 tag 源码的
-      #  desktop-tauri/ui/ 实测逐字节一致，208 个文件全同。）
-      # 这一步同时是**上游漂移探针**：仓库里提交的面板副本若与上游不一致，
-      # verify_webui_provenance() 会按钉住的树哈希失败，逼我们人工确认
-      # 「面板形态是否还是 fngateway 能改写的那一种」。
+      # 刷新 app/ui 到「进包形态」并跑全部预检。面板来源同样由模式决定：
+      #   release → 官方包里的 ui/（与二进制同出一次上游发布）；
+      #   source  → 该 tag 源码的 desktop-tauri/ui（两种来源实测逐字节一致）。
+      # 这一步同时是**上游漂移探针**：拿到的面板若与 build.py 钉住的树哈希不一致，
+      # verify_webui_provenance() 会硬失败，逼我们人工确认「面板形态是否还是
+      # fngateway 能改写的那一种」（升级路径上由 bump_upstream.py 重算并改钉子，
+      # 所以这条主要拦的是「面板在别处被悄悄改动」）。
       #
       # 注意它只写 app/ui、不碰 .local-build/bin —— 二进制来自上面的
       # Download binaries 步骤（binaries job 的产物），不会被这一步覆盖。
+      # source 模式下这一步会顺带下载 tag 源码（面板的来源），不装 Rust。
       - name: Sync upstream UI + preflight checks
         run: python3 build.py --sync-upstream
 
@@ -341,6 +497,10 @@ jobs:
           ## Build Summary
 
           **Version:** ${APP_VERSION}
+
+          **上游产物形态:** \`${{ steps.mode.outputs.mode }}\`
+          （\`release\` = 二进制与面板取自上游官方 Linux 服务端包；
+           \`source\` = 上游该 tag 未发官方包，二进制由 tag 源码交叉编译）
 
           **Git Info:**
           - Commit: \`${{ github.sha }}\`
