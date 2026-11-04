@@ -23,9 +23,10 @@
     源码，两条路共用同一套组装与自检。
   * 上游 WebUI（desktop-tauri/ui，v3.3.0-beta.4 为 218 个文件）不再入库，构建时
     从 .local-build/upstream-bundle-<arch>/ui/ 注入 app/ui/
-  * 额外校验: 面板入口文件齐备、i18n 五语词典齐全、PWA 文件在、面板资源引用是
-    裸相对路径（fngateway 的 HTML 改写依赖这一形态；一旦上游改成绝对路径，网关
-    会静默失效）、上游二进制的 glibc 要求 ≤ 飞牛上限、防替身二进制
+  * 额外校验: 面板入口文件齐备、i18n 词典齐全（每个语言的每个域 + v3.4.1 起的
+    合并词典 i18n/combined/<locale>.js，两条注入路径都要在）、PWA 文件在、面板
+    资源引用是裸相对路径（fngateway 的 HTML 改写依赖这一形态；一旦上游改成绝对
+    路径，网关会静默失效）、上游二进制的 glibc 要求 ≤ 飞牛上限、防替身二进制
 
 用法:
     python build.py                    # 打包（amd64 + arm64 各一个包）
@@ -275,6 +276,25 @@ GATEWAY_BIN = "fngateway-linux-{arch}"
 # 新增的是 css/page-routing{,-trace}.css 与 5 种语言的 i18n/*/routing.js，删掉的是
 # titlebar.js、tooltip.js。每个语言的词典域因此从 19 涨到 20 —— 语言集仍是五语
 # （无 zh-CN），而 i18n 校验是从目录列表动态推导 locale，所以**列表无需增删**。
+#
+# v3.4.1 复核结果（2026-11-04，实测官方包 sha256 90f8409b…）：面板 233 → 256 个文件
+# （新增 24 / 删除 1 / 修改 93）。**i18n 结构这次真的变了，两处都要注意**：
+#   1. 词典域 20 → 22（新增 account-settings、tools）；
+#   2. 新增 `i18n/combined/`：每个语言一个**合并词典**（en/ja/ko/pt-BR/zh-Hant.js，
+#      各 0.77–0.94 MB，把 22 个域合成一份）。index.html 不再注入 manifest + 各域
+#      文件，只写一行 `i18n/combined/<locale>.js` 并置 window.__WB_I18N_INJECTED。
+#      于是「i18n/ 下每个子目录都是语言目录」这个前提**不再成立** —— combined/
+#      按字典序排在 en 之前，里面装的是语言名而不是域名，旧写法（拿 locales[0]
+#      推域清单）会把域清单推成 [en, ja, ko, pt-BR, zh-Hant]，五语全部误报缺词典
+#      （2026-11-04 CI 的实际失败形态）。check_webui() 的 i18n 校验已改成以
+#      manifest.js 的域清单为基准、并把子目录分类成语言目录/合并词典目录。
+#   3. 三条注入路径并存：index.html（合并词典）、login.html（login+accounts 两个域）、
+#      m.html 手机端（manifest + 各域）。所以**单个域文件与合并词典都必需**，
+#      删任一边都会让某种入口在某种语言下白屏。
+#      合并词典**不进 UI_REQUIRED**（那张表是「钉住某一版的具体路径」，钉了
+#      i18n/combined/en.js 就等于让更早的 pin 无法构建），改由 check_webui()
+#      按 index.html 实际引用的路径逐语言核 —— 见该函数 i18n 段落。
+#   另：css/page-routing-trace.css 被上游删除（页面随之改名 page-routing-*）。
 UI_REQUIRED = (
     "ui/index.html",
     "ui/login.html",
@@ -537,6 +557,29 @@ def check_text_hygiene():
 # 上游 WebUI 预检
 # ---------------------------------------------------------------------------
 
+# i18n/manifest.js 里的域清单：`window.__WB_I18N_DOMAINS = ["common", "login", ...]`
+I18N_DOMAINS_RE = re.compile(r"__WB_I18N_DOMAINS\s*=\s*\[([^\]]*)\]")
+
+
+def _i18n_domains(i18n_dir):
+    """读 i18n/manifest.js 里的域清单，读不到返回 None。
+
+    这是面板**自己**用的那份清单：m.html 先注入 manifest.js，i18n.js 再按
+    window.__WB_I18N_DOMAINS 逐个 document.write 出 i18n/<locale>/<domain>.js。
+    所以「每个语言该有哪些词典」只能以它为准，不能靠扫目录 —— 见 check_webui()
+    里 i18n 段落的注释（v3.4.1 的 combined/ 会让「扫第一个子目录」推出假域清单）。
+    """
+    p = os.path.join(i18n_dir, "manifest.js")
+    if not os.path.isfile(p):
+        return None
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        m = I18N_DOMAINS_RE.search(f.read())
+    if not m:
+        return None
+    names = [s.strip().strip("\"'") for s in m.group(1).split(",")]
+    return sorted(n for n in names if n) or None
+
+
 def check_webui():
     """校验随包的上游 WebUI 齐备，且资源引用形态仍是我们适配的那一种。
 
@@ -558,6 +601,7 @@ def check_webui():
             problems.append(f"缺少 app/{rel}（上游 desktop-tauri/ui 未完整）")
 
     index = os.path.join(ui_root, "index.html")
+    html = ""
     if os.path.exists(index):
         with open(index, "r", encoding="utf-8", errors="replace") as f:
             html = f.read()
@@ -592,30 +636,78 @@ def check_webui():
         if not os.path.exists(p):
             problems.append(f"缺少 app/{rel}（手机端 PWA 会静默失效）")
 
-    # i18n 词典：index.html 在 head 里按语言动态注入 i18n/<locale>/<domain>.js。
-    # 六个语言目录必须齐全，且每个语言都必须有 index.html 会注入的那些 domain ——
-    # 少一个 domain 会在那个语言下抛 ReferenceError，表现是整页脚本停摆。
+    # i18n 词典：面板有**三条并行**的注入路径，断任一条都只表现为「某种入口在
+    # 某种语言下白屏 / 整页脚本停摆」，属于典型的装完才发现。三者基准各不相同：
+    #   · index.html（主面板）  ：只注入 i18n/combined/<locale>.js（合并词典，v3.4.1 起）
+    #   · login.html（登录页）  ：按域注入 i18n/<locale>/{login,accounts}.js
+    #   · m.html（手机端）      ：注入 i18n/manifest.js，再由 i18n.js 按域清单
+    #                             逐个补写 i18n/<locale>/<domain>.js
+    # 所以校验必须同时覆盖「合并词典齐」与「每个语言的每个域齐」，且域清单只能取
+    # manifest.js 里那份（面板自己用的 window.__WB_I18N_DOMAINS）—— 不能再用
+    # 「i18n/ 下第一个子目录里有哪些 .js」来推：v3.4.1 的 combined/ 按字典序排在
+    # en 前面，里面装的是**语言名**，照旧写法会把域清单推成
+    # [en, ja, ko, pt-BR, zh-Hant]，五个语言全部误报缺词典
+    # （2026-11-04 CI 的实际失败形态：i18n/en/ 缺少词典: en, ja, ko, pt-BR, zh-Hant）。
     i18n_dir = os.path.join(ui_root, "i18n")
     if not os.path.isdir(i18n_dir):
         problems.append("缺少 app/ui/i18n/（面板在国际化语言下会白屏）")
     else:
-        locales = sorted(d for d in os.listdir(i18n_dir)
+        domains = _i18n_domains(i18n_dir)
+        if domains is None:
+            problems.append("i18n/manifest.js 缺失或解析不出 window.__WB_I18N_DOMAINS"
+                            "（手机端与登录页的词典注入会整片失效）")
+        subdirs = sorted(d for d in os.listdir(i18n_dir)
                          if os.path.isdir(os.path.join(i18n_dir, d)))
-        if not locales:
+        if not subdirs:
             problems.append("app/ui/i18n/ 下没有任何语言目录")
-        else:
-            domains = sorted(
-                os.path.splitext(n)[0]
-                for n in os.listdir(os.path.join(i18n_dir, locales[0]))
-                if n.endswith(".js")
-            )
+        elif domains is not None:
+            domain_set = set(domains)
+            locales = []      # 语言目录：里面装的是「域」文件
+            merged_dirs = []  # 合并词典目录：里面装的是「语言」文件（v3.4.1 的 combined/）
+            unknown = []
+            for d in subdirs:
+                names = {os.path.splitext(n)[0]
+                         for n in os.listdir(os.path.join(i18n_dir, d))
+                         if n.endswith(".js")}
+                if names & domain_set:
+                    locales.append(d)
+                elif names and names <= (set(subdirs) | {"zh-Hans"}):
+                    merged_dirs.append(d)
+                else:
+                    # 既不含任何已知域、文件名又不全是语言代码 —— 上游换了结构。
+                    # 这里必须硬报错，否则这类守卫会静默失效（v3.4.1 就是这么
+                    # 暴露成「五语全缺词典」的）。
+                    unknown.append(f"i18n/{d}/（{', '.join(sorted(names)[:4]) or '空目录'}）")
+            if not locales:
+                problems.append("app/ui/i18n/ 下找不到装词典域文件的语言目录")
+            for d in unknown:
+                problems.append(f"{d} 既不是语言目录（不含任何词典域）也不是合并词典目录"
+                                f"（文件名不是语言代码）—— 上游 i18n 结构变了，"
+                                f"请复核 check_webui() 的 i18n 段落")
+            # ① 每个语言的每个域都要在（login.html / m.html 走这条路径）
             for loc in locales:
                 missing = [d for d in domains
                            if not os.path.exists(os.path.join(i18n_dir, loc, d + ".js"))]
                 if missing:
                     problems.append(f"i18n/{loc}/ 缺少词典: {', '.join(missing[:5])}")
+            # ② 合并词典：index.html 只注入 i18n/combined/<locale>.js（v3.4.1 起），
+            #    一个语言一份。要求由**页面实际引用的路径**驱动，而不是「目录在不在」：
+            #    目录整个缺失时 merged_dirs 是空的，光查「目录里少了谁」查不出来 ——
+            #    而那正是最糟的形态（面板一条词典都加载不到，全界面回落简体原文）。
+            bundle_dirs = list(merged_dirs)
+            if "i18n/combined/" in html and "combined" not in bundle_dirs:
+                bundle_dirs.append("combined")
+            for md in bundle_dirs:
+                missing = [loc for loc in locales
+                           if not os.path.exists(os.path.join(i18n_dir, md, loc + ".js"))]
+                if missing:
+                    problems.append(
+                        f"i18n/{md}/ 缺少合并词典: {', '.join(missing[:5])}"
+                        f"（index.html 只注入合并词典，这些语言下主面板没有任何词典）")
             log(f"  i18n: {len(locales)} 种语言（{', '.join(locales)}），"
-                f"{len(domains)} 个词典域")
+                f"{len(domains)} 个词典域"
+                + (f"；合并词典 {len(merged_dirs)} 个目录"
+                   f"（{', '.join(merged_dirs)}）" if merged_dirs else ""))
 
     # 模型图标：目录必须在，且两个索引里引用到的每个图标都真实存在。
     prov_dir = os.path.join(ui_root, "assets", "providers")
