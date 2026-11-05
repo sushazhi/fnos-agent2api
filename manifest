@@ -1,5 +1,5 @@
 appname               = agent2api
-version               = 3.4.1-1
+version               = 3.4.2-1
 display_name          = Agent2API
 desc                  = <b>账号池 → OpenAI 兼容 API 网关</b>：把本地 AI 客户端（WorkBuddy、Qoder、Cline、Trae 等，另支持自定义）的账号统一成标准接口，内置 Web 控制台与手机端页面。单文件静态二进制，<b>无需 Docker、无需 Node 运行时</b>，安装即用。<br><br>- 标准 <code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/messages</code>、<code>/v1/models</code>，另支持图片生成与参考图编辑<br>- 多账号轮转、失败重试，本地 SQLite 持久化<br>- 控制台复用飞牛登录态，<b>无需独立登录密码</b>，仅管理员可访问<br>- 下游接入 <code>http://＜飞牛IP＞:3065/v1</code>，任意 OpenAI SDK 直连<br>- ⚠️ 上游自 v3.3.0-beta.2 起为 AGPL-3.0，许可全文随包（LICENSE.upstream）；账号凭据以明文存储于应用数据目录，请勿在共享设备上使用
 
@@ -29,4 +29,4 @@ desktop_uidir         = ui
 desktop_applaunchname = agent2api.Application
 
 # 更新日志
-changelog             = v3.4.1-1<br>1.上游 agent2api v3.4.1 原样集成（零源码改动），二进制与面板取自上游官方 Linux 服务端包<br>2.本条目由 GitHub Actions 定时检查上游后自动生成
+changelog             = v3.4.2-1<br>1.上游 agent2api v3.4.2 原样集成（零源码改动），二进制与面板取自上游官方 Linux 服务端包<br>2.本条目由 GitHub Actions 定时检查上游后自动生成
