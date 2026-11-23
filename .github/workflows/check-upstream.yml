@@ -145,6 +145,12 @@ jobs:
       - name: Self-check bump/reload consistency
         run: python3 tools/check_bump_reload.py
 
+      # 守卫自己的回归测试（不需要网络）：面板预检按「页面实际引用了什么」判，
+      # 用合成树覆盖 3.3 / 3.4 / 3.5 三种真实 i18n 形态与六个负例。放在 bump
+      # 之前 —— 守卫坏了就根本不去改仓库，而不是改完卡在 [6/6] 白等一天。
+      - name: Self-test WebUI guard
+        run: python3 tools/test_webui_guard.py
+
       # 把「查上游 → 定产物形态 → 改 pin → 重钉官方包 sha256 → 同步面板 →
       # 重算树哈希 → 改 manifest → 跑构建期守卫」一次做完。守卫不过会非零退出，
       # 后面的提交就不会发生。逻辑放在 tools/bump_upstream.py 里而不是写进 YAML，

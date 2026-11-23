@@ -132,6 +132,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 守卫自己的回归测试：check_webui() 现在按「页面实际引用了什么」判，
+      # 并用合成树覆盖上游 3.3 / 3.4 / 3.5 三种 i18n 形态 + 六个负例。
+      # 不需要网络、几毫秒；坏了就在 PR/构建最前面失败，而不是等下一次
+      # 上游发版时才发现「修好一种形态、弄坏另一种」。
+      - name: Self-test WebUI guard
+        run: python3 tools/test_webui_guard.py
+
       # 先问产物形态：Rust 工具链只在 source 模式装，release 模式一行都不多跑。
       # 这个值来自仓库里提交的 build.py 常量（bump_upstream.py 升级时写入），
       # 不是本 workflow 现场判断的 —— 保证「包是怎么来的」在 git 历史里可审计。

@@ -310,6 +310,7 @@ GATEWAY_BIN = "fngateway-linux-{arch}"
 UI_REQUIRED = (
     "ui/index.html",
     "ui/login.html",
+    "ui/m.html",
     "ui/app.js",
     "ui/icons.js",
     "ui/i18n.js",
@@ -332,6 +333,30 @@ FNPACK_VER = "1.2.3"
 # 改写逻辑仍然工作，但若改成绝对 http(s) 或 CDN 前缀，网关就静默失效了。
 BARE_ASSET_RE = re.compile(r'(?i)\b(?:src|href)\s*=\s*"([^"]+)"')
 ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
+
+# --- 引用闭合性：页面要什么，树上就必须有什么 ---------------------------------
+#
+# UI_REQUIRED 那种「钉住某个具体路径」的清单只能证明「这一版我认识的文件还在」，
+# 证明不了「页面新引用的文件也在」；上游改一次目录结构，它还会整片误报
+# （v3.4.1 的 combined/、v3.5.0 的 manifest 下线，都是这么炸的）。
+#
+# 真正稳定的判据只有一条：**页面里的每个站内引用都要能解析到树里的文件**。
+# 这条判据不依赖目录形状，也不依赖版本号 —— 上游加页面、换文件名、拆目录都
+# 自动覆盖；上游删了我们还在引用的文件则立刻报错，且报错直接点名哪个页面、
+# 哪个路径。BARE_ASSET_RE 仍然保留，它服务的是另一件事（判断 fngateway 的
+# 裸相对路径改写是否还适用），两者不能互相替代。
+#
+# srcset / imagesrcset 单独拆：一个属性里是逗号分隔的「URL + 描述符」列表，
+# 按 URL 逐个核。fngateway 的 htmlAttrRe 目前不认它们（由运行时 bridge 兜），
+# 但「文件在不在」与「谁来改写」是两件事：文件缺了，bridge 也补不出来。
+HTML_REF_ATTR_RE = re.compile(
+    r"(?i)\b(src|href|action|poster)\s*=\s*([\"'])([^\"']*)\2"
+)
+HTML_SRCSET_RE = re.compile(r"(?i)\b(srcset|imagesrcset)\s*=\s*([\"'])([^\"']*)\2")
+# 内联 <script> 的**正文**不参与引用解析：里面的 document.write 是拼接出来的
+# 动态路径（`"i18n/combined/" + locale + ".js"`），按静态属性去核必然误报。
+# 标签本身（含 src=）保留，所以外链脚本照样能核。
+INLINE_SCRIPT_RE = re.compile(r'(?is)<script\b([^>]*)>.*?</script>')
 
 # 面板里**允许存在**的根绝对路径引用（白名单，不是放行改写失效）。
 #
@@ -395,8 +420,12 @@ UI_PROVIDER_DIR = "ui/assets/providers"
 # —— 因为后者写的是 `icon: 'openai.png'`，**没有**目录前缀）。
 #   反代（islands/ui.js）      : "assets/providers/openai.png"（完整路径字面量）
 #   预置（preset-providers.js）: icon: 'openai.png'（iconOf() 再拼目录）
-ICON_REF_RE = re.compile(r'assets/providers/([A-Za-z0-9._\-]+\.png)')
-ICON_DECL_RE = re.compile(r"""icon\s*:\s*['"]([A-Za-z0-9._\-]+\.png)['"]""")
+#
+# v3.5.0 起图标不再只有 .png：一批提供商换成了 .svg（copilot/devin/xai/…）。
+# 只认 .png 会让「引用了但文件不在」变成漏检，所以两个正则都放宽到 png|svg。
+ICON_FILE_EXTS = (".png", ".svg")
+ICON_REF_RE = re.compile(r'assets/providers/([A-Za-z0-9._\-]+\.(?:png|svg))')
+ICON_DECL_RE = re.compile(r"""icon\s*:\s*['"]([A-Za-z0-9._\-]+\.(?:png|svg))['"]""")
 
 # 二进制预检：上游官方包实测体积（amd64 13.75 MB / arm64 13.1 MB 量级）。
 # 下限取 8 MB —— 真实 Rust 产物远高于它，而占位/替身二进制（Go 假程序之类）
@@ -590,6 +619,44 @@ def _i18n_domains(i18n_dir):
     return sorted(n for n in names if n) or None
 
 
+def _strip_inline_scripts(html):
+    """去掉内联 <script> 的正文，保留标签与属性。
+
+    document.write 出来的路径是运行时拼接的（`"i18n/combined/" + locale + ".js"`），
+    按静态属性去核会被当成一个叫 `i18n/combined/' + locale + '.js` 的文件。
+    """
+    return INLINE_SCRIPT_RE.sub(lambda m: "<script" + m.group(1) + "></script>", html)
+
+
+def _local_asset_refs(html):
+    """页面里的**站内相对**资源引用，供引用闭合性检查用。
+
+    覆盖 src/href/action/poster 与 srcset/imagesrcset（后者按 URL 逐个拆）。
+    外链（带 scheme、协议相对 //）与根绝对路径（/x，由 _unexpected_root_abs
+    单独判）不在这里返回；查询串与锚点先剥掉再核。
+    """
+    text = _strip_inline_scripts(html)
+    raw_refs = [m.group(3) for m in HTML_REF_ATTR_RE.finditer(text)]
+    for m in HTML_SRCSET_RE.finditer(text):
+        for cand in m.group(3).split(","):
+            parts = cand.strip().split()
+            if parts:
+                raw_refs.append(parts[0])
+    out = []
+    for raw in raw_refs:
+        v = raw.strip()
+        if not v or v.startswith("#"):
+            continue
+        if ABSOLUTE_ASSET_RE.match(v):
+            continue
+        if v.startswith("/") or ".." in v.split("/"):
+            continue
+        v = v.split("#", 1)[0].split("?", 1)[0]
+        if v:
+            out.append(v)
+    return out
+
+
 def check_webui():
     """校验随包的上游 WebUI 齐备，且资源引用形态仍是我们适配的那一种。
 
@@ -637,6 +704,28 @@ def check_webui():
             )
         log(f"  index.html: {len(refs)} 个资源引用"
             f"（根绝对路径 {len(root_abs)} 个，未登记 {len(unexpected)} 个）")
+
+    # 引用闭合性（见 HTML_REF_ATTR_RE 上方注释）：三个入口页里每个站内引用
+    # 都必须能在 ui/ 里解析到。这条判据不依赖目录形状 —— 上游把文件改名、
+    # 拆目录、换 i18n 结构都自动覆盖，而不是等我们某天想起来去改 UI_REQUIRED。
+    for page in ("index.html", "login.html", "m.html"):
+        p = os.path.join(ui_root, page)
+        if not os.path.isfile(p):
+            # 缺入口页由 UI_REQUIRED 报，这里不重复
+            continue
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        refs_local = _local_asset_refs(text)
+        missing = [v for v in sorted(set(refs_local))
+                   if not os.path.exists(os.path.join(ui_root, *v.split("/")))]
+        if missing:
+            problems.append(
+                f"app/ui/{page} 引用了不存在的资源: "
+                + ", ".join(missing[:6])
+                + (f" 等 {len(missing)} 个" if len(missing) > 6 else "")
+                + " —— 子路径部署下会 404 / 白屏，请复核上游面板是否拆了目录或改了文件名"
+            )
+        log(f"  {page}: {len(refs_local)} 个站内引用，缺失 {len(missing)} 个")
 
     # 面板自带的 PWA 文件：sw.js 与 manifest.webmanifest 由浏览器**按固定路径**
     # 请求（不在 index.html 的资源引用里），缺了不会白屏，只会让手机端
@@ -749,7 +838,8 @@ def check_webui():
         problems.append("缺少 app/ui/assets/providers/（「添加账号」里的模型图标"
                         "会全部空白，反代与预置两处都受影响）")
     else:
-        on_disk = {n for n in os.listdir(prov_dir) if n.lower().endswith(".png")}
+        on_disk = {n for n in os.listdir(prov_dir)
+                   if n.lower().endswith(ICON_FILE_EXTS)}
         referenced = set()
         # 两个索引写法不同，两条正则都要跑（见 ICON_DECL_RE 上方注释）。
         for rel in ("ui/preset-providers.js", "ui/islands/ui.js"):
