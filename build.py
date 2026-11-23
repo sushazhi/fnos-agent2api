@@ -295,14 +295,24 @@ GATEWAY_BIN = "fngateway-linux-{arch}"
 #      i18n/combined/en.js 就等于让更早的 pin 无法构建），改由 check_webui()
 #      按 index.html 实际引用的路径逐语言核 —— 见该函数 i18n 段落。
 #   另：css/page-routing-trace.css 被上游删除（页面随之改名 page-routing-*）。
+#
+# v3.5.0 复核结果（2026-11-23，实测官方包 sha256 ab4417bb…）：面板 256 → 167 个文件。
+# **i18n 结构第二次收敛，UI_REQUIRED 因此删掉两条**：
+#   1. `i18n/manifest.js` 整个文件没了 —— m.html 不再走「manifest + 各域」，
+#      改成与 index.html 一样只注入 `i18n/combined/<locale>.js`；
+#   2. 每语言的域文件只剩 login.js / accounts.js（login.html 用到的两个域），
+#      其余 20 个域（含原先钉在这里的 pt-BR/common.js）全部并入合并词典。
+#   所以这里**不再钉**具体 i18n 路径：它们是版本专属的（combined/ 直到 v3.4.1 才出现），
+#   钉死会让别的 pin 编不动。i18n 齐备性由 check_webui() 按「页面实际注入了什么」
+#   逐语言核，见该函数的 i18n 段落。
+#   另：changelog 写明「下线旧版独立移动端目录」——m/mobile.js 全文 0 处
+#   serviceWorker，手机端已不再注册 SW（sw.js 仍随包，但无人注册）。
 UI_REQUIRED = (
     "ui/index.html",
     "ui/login.html",
     "ui/app.js",
     "ui/icons.js",
     "ui/i18n.js",
-    "ui/i18n/manifest.js",
-    "ui/i18n/pt-BR/common.js",
     "ui/islands/ui.js",
     "ui/css/tokens.css",
     "ui/css/layout.css",
@@ -636,76 +646,100 @@ def check_webui():
         if not os.path.exists(p):
             problems.append(f"缺少 app/{rel}（手机端 PWA 会静默失效）")
 
-    # i18n 词典：面板有**三条并行**的注入路径，断任一条都只表现为「某种入口在
-    # 某种语言下白屏 / 整页脚本停摆」，属于典型的装完才发现。三者基准各不相同：
-    #   · index.html（主面板）  ：只注入 i18n/combined/<locale>.js（合并词典，v3.4.1 起）
-    #   · login.html（登录页）  ：按域注入 i18n/<locale>/{login,accounts}.js
-    #   · m.html（手机端）      ：注入 i18n/manifest.js，再由 i18n.js 按域清单
-    #                             逐个补写 i18n/<locale>/<domain>.js
-    # 所以校验必须同时覆盖「合并词典齐」与「每个语言的每个域齐」，且域清单只能取
-    # manifest.js 里那份（面板自己用的 window.__WB_I18N_DOMAINS）—— 不能再用
-    # 「i18n/ 下第一个子目录里有哪些 .js」来推：v3.4.1 的 combined/ 按字典序排在
-    # en 前面，里面装的是**语言名**，照旧写法会把域清单推成
-    # [en, ja, ko, pt-BR, zh-Hant]，五个语言全部误报缺词典
-    # （2026-11-04 CI 的实际失败形态：i18n/en/ 缺少词典: en, ja, ko, pt-BR, zh-Hant）。
+    # i18n 词典：注入路径在三个版本里换过三次，**不能按某一种目录结构写死**：
+    #   · v3.3.x 及更早：m.html 注入 i18n/manifest.js，i18n.js 再按
+    #     window.__WB_I18N_DOMAINS 逐域补写 i18n/<locale>/<domain>.js；
+    #   · v3.4.1：index.html 改用合并词典 i18n/combined/<locale>.js，
+    #     但 m.html / login.html 仍走 manifest + 各域；
+    #   · v3.5.0：manifest.js 与 20 个域文件一起下线，index.html / m.html 都只注入
+    #     合并词典，login.html 只注入 login + accounts 两个域。
+    # 所以判据改成「页面自己引用了什么，就要求什么」：
+    #   ① 页面引用 i18n/manifest.js → 文件必须在，且域清单要解析得出来；
+    #   ② 语言目录里 login.js / accounts.js 必须在（login.html 的注入路径）；
+    #   ③ 页面引用 i18n/combined/ → 每个语言一份合并词典都不能少。
+    # 语言目录 / 合并词典目录的区分也换成内容判据（login|accounts vs 语言代码），
+    # 不再用「i18n/ 下第一个子目录」—— v3.4.1 的 combined/ 按字典序排在 en 前面，
+    # 旧写法会把域清单推成 [en, ja, ko, pt-BR, zh-Hant]，五语全部误报缺词典
+    # （2026-11-04 CI 的实际失败形态）。
     i18n_dir = os.path.join(ui_root, "i18n")
     if not os.path.isdir(i18n_dir):
         problems.append("缺少 app/ui/i18n/（面板在国际化语言下会白屏）")
     else:
+        pages = {}
+        for name in ("index.html", "login.html", "m.html", "i18n.js"):
+            p = os.path.join(ui_root, *name.split("/"))
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    pages[name] = f.read()
+        # 只看 HTML 页面写了什么：i18n.js 的注释里也可能出现这些路径字样，
+        # 拿它当「页面在注入」的证据会造成误报。
+        html_text = "".join(pages.get(n, "")
+                            for n in ("index.html", "login.html", "m.html"))
+        manifest_used = "i18n/manifest.js" in html_text
+        combined_used = "i18n/combined/" in (html_text + pages.get("i18n.js", ""))
+        manifest = os.path.join(i18n_dir, "manifest.js")
+        if manifest_used and not os.path.isfile(manifest):
+            problems.append("页面仍在注入 i18n/manifest.js，但该文件已缺失"
+                            "（按域注入词典的入口会整片失效）")
         domains = _i18n_domains(i18n_dir)
-        if domains is None:
-            problems.append("i18n/manifest.js 缺失或解析不出 window.__WB_I18N_DOMAINS"
-                            "（手机端与登录页的词典注入会整片失效）")
         subdirs = sorted(d for d in os.listdir(i18n_dir)
                          if os.path.isdir(os.path.join(i18n_dir, d)))
         if not subdirs:
             problems.append("app/ui/i18n/ 下没有任何语言目录")
-        elif domains is not None:
-            domain_set = set(domains)
-            locales = []      # 语言目录：里面装的是「域」文件
-            merged_dirs = []  # 合并词典目录：里面装的是「语言」文件（v3.4.1 的 combined/）
+        else:
+            locales = []      # 语言目录：装 login / accounts 等「域」文件
+            merged_dirs = []  # 合并词典目录：装的是「语言」文件（v3.4.1 起的 combined/）
             unknown = []
             for d in subdirs:
                 names = {os.path.splitext(n)[0]
                          for n in os.listdir(os.path.join(i18n_dir, d))
                          if n.endswith(".js")}
-                if names & domain_set:
+                if {"login", "accounts"} & names:
                     locales.append(d)
                 elif names and names <= (set(subdirs) | {"zh-Hans"}):
                     merged_dirs.append(d)
                 else:
-                    # 既不含任何已知域、文件名又不全是语言代码 —— 上游换了结构。
-                    # 这里必须硬报错，否则这类守卫会静默失效（v3.4.1 就是这么
-                    # 暴露成「五语全缺词典」的）。
+                    # 既不含 login/accounts、文件名又不全是语言代码 —— 上游换了结构。
+                    # 这里必须硬报错，否则守卫会静默失效（v3.4.1 就是这么暴露成
+                    # 「五语全缺词典」的）。
                     unknown.append(f"i18n/{d}/（{', '.join(sorted(names)[:4]) or '空目录'}）")
             if not locales:
-                problems.append("app/ui/i18n/ 下找不到装词典域文件的语言目录")
+                problems.append("app/ui/i18n/ 下找不到语言目录（应含 login.js / accounts.js）")
             for d in unknown:
-                problems.append(f"{d} 既不是语言目录（不含任何词典域）也不是合并词典目录"
-                                f"（文件名不是语言代码）—— 上游 i18n 结构变了，"
-                                f"请复核 check_webui() 的 i18n 段落")
-            # ① 每个语言的每个域都要在（login.html / m.html 走这条路径）
-            for loc in locales:
-                missing = [d for d in domains
-                           if not os.path.exists(os.path.join(i18n_dir, loc, d + ".js"))]
-                if missing:
-                    problems.append(f"i18n/{loc}/ 缺少词典: {', '.join(missing[:5])}")
-            # ② 合并词典：index.html 只注入 i18n/combined/<locale>.js（v3.4.1 起），
-            #    一个语言一份。要求由**页面实际引用的路径**驱动，而不是「目录在不在」：
-            #    目录整个缺失时 merged_dirs 是空的，光查「目录里少了谁」查不出来 ——
+                problems.append(f"{d} 既不是语言目录（不含 login / accounts）"
+                                f"也不是合并词典目录（文件名不是语言代码）—— "
+                                f"上游 i18n 结构变了，请复核 check_webui() 的 i18n 段落")
+            # ② login.html 的注入路径（v3.5.0 起是唯一的按域入口）
+            if "/login.js" in pages.get("login.html", ""):
+                for loc in locales:
+                    missing = [d for d in ("login", "accounts")
+                               if not os.path.exists(os.path.join(i18n_dir, loc, d + ".js"))]
+                    if missing:
+                        problems.append(f"i18n/{loc}/ 缺少词典: {', '.join(missing)}"
+                                        f"（登录页在这些语言下会缺文案）")
+            # ① 旧模型：manifest 的域清单，每个语言的每个域都要在
+            if domains is not None:
+                for loc in locales:
+                    missing = [d for d in domains
+                               if not os.path.exists(os.path.join(i18n_dir, loc, d + ".js"))]
+                    if missing:
+                        problems.append(f"i18n/{loc}/ 缺少词典: {', '.join(missing[:5])}")
+            # ③ 合并词典：由**页面实际引用的路径**驱动，而不是「目录在不在」——
+            #    目录整个缺失时 merged_dirs 是空的，光查「目录里少了谁」查不出来，
             #    而那正是最糟的形态（面板一条词典都加载不到，全界面回落简体原文）。
-            bundle_dirs = list(merged_dirs)
-            if "i18n/combined/" in html and "combined" not in bundle_dirs:
-                bundle_dirs.append("combined")
-            for md in bundle_dirs:
-                missing = [loc for loc in locales
-                           if not os.path.exists(os.path.join(i18n_dir, md, loc + ".js"))]
-                if missing:
-                    problems.append(
-                        f"i18n/{md}/ 缺少合并词典: {', '.join(missing[:5])}"
-                        f"（index.html 只注入合并词典，这些语言下主面板没有任何词典）")
-            log(f"  i18n: {len(locales)} 种语言（{', '.join(locales)}），"
-                f"{len(domains)} 个词典域"
+            if combined_used or "combined" in merged_dirs:
+                if "combined" not in merged_dirs:
+                    problems.append("缺少 i18n/combined/（主面板与手机端都注入合并词典，"
+                                    "缺失等于所有非简体语言都没有词典）")
+                else:
+                    for loc in locales:
+                        if not os.path.exists(os.path.join(i18n_dir, "combined", loc + ".js")):
+                            problems.append(
+                                f"i18n/combined/ 缺少合并词典: {loc}.js"
+                                f"（该语言下主面板与手机端都没有任何词典）")
+            log(f"  i18n: {len(locales)} 种语言（{', '.join(locales) or '—'}），"
+                + (f"{len(domains)} 个词典域" if domains is not None
+                   else "无域清单（合并词典模型）")
                 + (f"；合并词典 {len(merged_dirs)} 个目录"
                    f"（{', '.join(merged_dirs)}）" if merged_dirs else ""))
 
@@ -1098,6 +1132,11 @@ def patch_sw_scope(dst):
 
     v3.3.0-beta.4 实测（2026-10-26）：写法仍未变，同样命中且只命中 1 处，
     补丁后 `scope:"./"`（`ui/m/mobile.js` 里 `serviceWorker.register` 仅 1 次）。
+
+    v3.5.0 实测（2026-11-23）：**手机端不再注册 Service Worker** ——
+    `m/mobile.js`（509,919 B）全文 0 处 `serviceWorker` / `sw.js`，`m.html`
+    也没有内联注册。sw.js 仍随包但没有任何入口注册它（上游把离线壳降级掉了）。
+    这时补丁**无事可做**，不是「上游改了注册写法」，所以只记一行说明、不告警。
     """
     target = os.path.join(dst, "m", "mobile.js")
     if not os.path.isfile(target):
@@ -1105,6 +1144,9 @@ def patch_sw_scope(dst):
         return
     with open(target, "r", encoding="utf-8") as f:
         text = f.read()
+    if "serviceWorker" not in text:
+        log("  SW scope: 上游面板不再注册 Service Worker（v3.5.0 起），跳过")
+        return
     new, n = SW_SCOPE_RE.subn(r'\1"./"', text)
     if n == 0:
         if "./" in text and "serviceWorker.register" in text:
@@ -1137,6 +1179,10 @@ def verify_sw_scope():
         return  # 缺文件由 check_webui() 报，这里不重复
     with open(target, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
+    if "serviceWorker" not in text:
+        # v3.5.0 起上游手机端不再注册 SW，没有 scope 可校验（见 patch_sw_scope）。
+        log("  SW scope: 上游面板不再注册 Service Worker（v3.5.0 起），跳过")
+        return
     if SW_SCOPE_RE.search(text):
         log("  ERROR: ui/m/mobile.js 仍用 scope:\"/\" 注册 Service Worker ——")
         log("    经 /app/agent2api 子路径部署时浏览器会抛 SecurityError"
