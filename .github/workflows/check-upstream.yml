@@ -95,6 +95,14 @@ on:
         description: '应急：强制这一版用源码构建（官方包装得上但跑不起来时用）'
         type: boolean
         default: false
+      keep_ui:
+        description: '只更新服务端：面板保持当前 pin，不跟着上游升（可回滚的过渡策略）'
+        type: boolean
+        default: false
+      ui_tag:
+        description: '显式把面板升/降到某个 tag（例 v3.4.2；留空=跟随二进制 tag；与 keep_ui 互斥）'
+        type: string
+        default: ''
 
 permissions:
   # 提交 + 打 tag（Release 由 build-and-release.yml 建，那边也有 contents: write）
@@ -168,6 +176,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ inputs.force }}
           FORCE_SOURCE: ${{ inputs.force_source }}
+          KEEP_UI: ${{ inputs.keep_ui }}
+          UI_TAG: ${{ inputs.ui_tag }}
           # 纵深防御：不写 __pycache__ 就没有陈旧 .pyc 可被复用。load_build()
           # 本身已经不再依赖这一点（它会删 .pyc 并直接 exec 源码），但多一层
           # 保险没有代价 —— 这个 job 只跑一次，省下编译缓存没有意义。
@@ -182,6 +192,14 @@ jobs:
           if [ "${FORCE_SOURCE:-false}" = "true" ]; then
             echo "workflow_dispatch 指定 force_source=true —— 这一版强制走源码构建"
             args+=(--force-source)
+          fi
+          if [ "${KEEP_UI:-false}" = "true" ]; then
+            echo "workflow_dispatch 指定 keep_ui=true —— 只更新服务端，面板保持当前 pin"
+            args+=(--keep-ui)
+          fi
+          if [ -n "${UI_TAG:-}" ]; then
+            echo "workflow_dispatch 指定 ui_tag=${UI_TAG} —— 显式换面板 pin"
+            args+=(--ui-tag "${UI_TAG}")
           fi
           python3 tools/bump_upstream.py "${args[@]}"
 
@@ -277,6 +295,7 @@ jobs:
           NEWER: ${{ steps.check.outputs.newer }}
           MODE: ${{ steps.check.outputs.mode }}
           UPSTREAM_TAG: ${{ steps.check.outputs.upstream_tag }}
+          UI_TAG: ${{ steps.check.outputs.ui_tag }}
           APP_VERSION: ${{ steps.check.outputs.app_version }}
           TAG: ${{ steps.check.outputs.tag }}
         run: |
@@ -288,6 +307,7 @@ jobs:
             echo "| 上游有更新 | \`${NEWER:-n/a}\` |"
             echo "| 需要构建 | \`${UPDATE:-n/a}\` |"
             echo "| 上游 tag | \`${UPSTREAM_TAG:-n/a}\` |"
+            echo "| 面板 pin | \`${UI_TAG:-n/a}\` |"
             echo "| 产物形态 | \`${MODE:-n/a}\` |"
             echo "| 应用版本 | \`${APP_VERSION:-n/a}\` |"
             echo "| 发布 tag | \`${TAG:-n/a}\` |"

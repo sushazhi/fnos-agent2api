@@ -459,6 +459,15 @@ jobs:
       - name: Sync upstream UI + preflight checks
         run: python3 build.py --sync-upstream
 
+      # 装配冒烟：用这个二进制 + 这份 app/ui 起一次服务，确认入口页与它引用的
+      # 每个静态资源都能取到（404 就是「打包成功、装上去半残」的形态）。
+      # 它不校验旧面板 + 新服务端的业务语义（接口字段/流程变化），只回答装配问题。
+      - name: Panel/server wiring smoke
+        run: |
+          python3 tools/smoke_panel.py \
+            --bin .local-build/bin/agent2api-server-linux-amd64 \
+            --ui app/ui
+
       # 与本地构建走的是同一条打包路径（build.py），CI 只负责把二进制喂进
       # .local-build/bin —— 本地与 CI 不会出现「两边包不一样」。
       #

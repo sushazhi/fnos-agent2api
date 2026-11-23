@@ -10,9 +10,11 @@
   2. build.py  UPSTREAM_BUNDLE_MODE     —— 产物形态：release（官方包）/ source（tag 源码自编）
   3. build.py  UPSTREAM_BUNDLE_SHA256   —— 官方 Linux 服务端包的 sha256（每架构一个，release 模式）
   4. build.py  UPSTREAM_UI_SHA256       —— 面板树的哈希（上游改一个字节就变）
-  5. manifest  version                  —— 上游版本-N（预发布时为 x.y.z-pre-N），
+  5. build.py  UPSTREAM_UI_TAG          —— 面板 pin（空 = 跟随二进制 tag；
+                                            --keep-ui 时固定为当前面板版本）
+  6. manifest  version                  —— 上游版本-N（预发布时为 x.y.z-pre-N），
                                             其中上游版本段必须等于 build.py 的 pin
-  6. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
+  7. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
 
 人工做这几步既繁琐又容易漏 —— 尤其第 3、4 项：两个哈希都得先下载上游产物、
 跑完同步才知道。本脚本把「查上游 → 改 pin → 定模式 → 取包内 sha256 → 同步面板 →
@@ -60,9 +62,21 @@ sha256，构建时由 build.py 的 fetch_server_bundle() 下载并校验。所�
     python tools/bump_upstream.py --apply --force --force-source
         # 应急：官方包装得上但跑不起来（或想核对源码构建）时，把这一版钉成
         # source 走自编。覆盖结果会写进 build.py 并随提交进入 git，可审计。
+    python tools/bump_upstream.py --apply --keep-ui
+        # 只更新服务端：二进制往前走，面板保持当前 UPSTREAM_UI_TAG（没有则
+        # 保持当前 pin 那一版）。适合上游面板大改、想先升服务端的过渡版本。
+    python tools/bump_upstream.py --apply --ui-tag v3.4.2
+        # 显式把面板升/降到某个 tag（重算面板树哈希），二进制 pin 照常跟进目标版本。
+
+「面板 pin」与「二进制 pin」为什么可以分开：面板是纯静态资源，由 fngateway
+用 AGENT2API_UI_DIR 指给上游进程（见 fngateway/main.go 的 childEnv），与二进制
+没有编译期绑定。默认仍跟随同一个 tag（上游验证过的配对）；--keep-ui 只用于
+「先升服务端」的过渡，代价是旧面板看不到新功能，且上游若删改面板用到的接口会
+局部报错 —— 所以这是可回滚的运维开关，不是长期策略。
 
 在 GitHub Actions 里会把结果写进 $GITHUB_OUTPUT（update / newer / mode /
-upstream_version / current_upstream_version / app_version / tag），供后续 job 使用。
+upstream_version / current_upstream_version / ui_tag / app_version / tag），
+供后续 job 使用。
 """
 import importlib
 import importlib.util
@@ -209,6 +223,21 @@ def bundle_available(upstream_tag, token=None):
     return has_bundle_assets(release_assets(rel))
 
 
+def tag_exists(tag, token=None):
+    """上游是否存在这个 tag（--ui-tag 的早失败校验）。
+
+    在改 build.py 之前查，避免「先写进仓库、下载时才发现 tag 打错」留下一个
+    半成品 pin。404 返回 False；其它错误抛出去（限流/网络不该被当成「不存在」）。
+    """
+    try:
+        api_get(f"repos/{build.UPSTREAM_REPO}/git/ref/tags/{tag}", token)
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise RuntimeError(f"查询上游 tag {tag} 失败（HTTP {e.code}）") from e
+
+
 def upstream_versions(token=None, allow_prerelease=False):
     """列出上游候选版本号（allow_prerelease 见文件头「跟不跟预发布」）。
 
@@ -293,6 +322,33 @@ def rewrite_pin(upstream_version):
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(new)
     log(f"  build.py: UPSTREAM_VERSION = {upstream_version}")
+
+
+def rewrite_ui_tag(tag):
+    """把 build.py 的 UPSTREAM_UI_TAG 改成 tag（空串 = 跟随二进制 pin）。
+
+    「只更新服务端」就是把它写成**当前**面板 tag（通常是上一版），二进制 pin
+    照常往前走。与 rewrite_pin 不同，这行的值可能从空串变成具体 tag，长度会变
+    —— 所以它必须在 load_build() 之前写、之后重新载入（load_build 会删 .pyc
+    并直接 exec 源码，不依赖等长）。
+    """
+    path = os.path.join(PROJECT_DIR, "build.py")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    new, n = re.subn(r'(?m)^UPSTREAM_UI_TAG\s*=\s*"[^"]*"',
+                     f'UPSTREAM_UI_TAG = "{tag}"', text)
+    if n != 1:
+        raise RuntimeError(
+            f"build.py 里 UPSTREAM_UI_TAG 匹配到 {n} 处，应为 1 处"
+            "（常量被改名/删除了？请同步更新 bump_upstream.rewrite_ui_tag）"
+        )
+    if new != text:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new)
+        log(f"  build.py: UPSTREAM_UI_TAG = {tag or '(跟随二进制 pin)'}")
+    else:
+        log(f"  build.py: UPSTREAM_UI_TAG 已是 {tag or '(跟随二进制 pin)'}")
+    return tag
 
 
 def rewrite_bundle_mode(mode):
@@ -554,7 +610,8 @@ def set_manifest_key(text, key, value):
     return "".join(lines)
 
 
-def bump_manifest(upstream_tag, app_version, mode=build.UPSTREAM_MODE_RELEASE):
+def bump_manifest(upstream_tag, app_version, mode=build.UPSTREAM_MODE_RELEASE,
+                  ui_tag=None):
     """把 manifest 的 version / changelog 改到位。
 
     版本号已经是目标值时**不动 changelog** —— 这样 `--force` 就是纯粹的
@@ -587,6 +644,15 @@ def bump_manifest(upstream_tag, app_version, mode=build.UPSTREAM_MODE_RELEASE):
                   f"面板取自同一 tag<br>")
     else:
         origin = f"1.上游 agent2api {upstream_tag} 原样集成（零源码改动），二进制与面板取自上游官方 Linux 服务端包<br>"
+    # 面板被冻结在别的 tag（--keep-ui / --ui-tag）：这是「用户装的是什么」的
+    # 关键事实，必须写进更新说明 —— 否则看到「3.5.0」会以为面板也升了。
+    # 注意 fnpack 把 ';' 当作取值终止符，这里不能出现分号（见 build.py 的
+    # MANIFEST_VALUE_TERMINATORS）。
+    if ui_tag and ui_tag != upstream_tag:
+        origin = origin.replace(
+            "<br>",
+            f"（本版只更新服务端，面板维持 {ui_tag}）<br>",
+        )
     new_entry = (
         f"v{app_version}<br>"
         + origin +
@@ -643,6 +709,23 @@ def main():
             raise SystemExit(f"ERROR: --upstream-version 不是合法版本号: {want!r}")
         want = ver_str(parse_ver(want))
 
+    # 面板 pin 的两种显式操作（见 build.py 文件头 UPSTREAM_UI_TAG）：
+    #   --keep-ui           这次只升服务端，面板保持当前 pin 不动
+    #   --ui-tag vX.Y.Z     把面板显式升/降到某个 tag（重算 UI 树哈希）
+    keep_ui = "--keep-ui" in args
+    ui_tag_arg = ""
+    if "--ui-tag" in args:
+        i = args.index("--ui-tag")
+        if i + 1 >= len(args):
+            raise SystemExit("ERROR: --ui-tag 后面要跟一个 tag（例：--ui-tag v3.4.2）")
+        ui_tag_arg = args[i + 1].strip()
+        if not ui_tag_arg.startswith("v"):
+            ui_tag_arg = "v" + ui_tag_arg
+        if not parse_ver(ui_tag_arg):
+            raise SystemExit(f"ERROR: --ui-tag 不是合法 tag: {ui_tag_arg!r}")
+    if keep_ui and ui_tag_arg:
+        raise SystemExit("ERROR: --keep-ui 与 --ui-tag 是互斥的：要么保持，要么显式指定")
+
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
 
     log("=" * 46)
@@ -683,6 +766,25 @@ def main():
         f"{'（--force 仍重打一次）' if force and not newer else ''}")
     log(f" 目标: 上游 {upstream_tag} → 应用版本 {app_version}")
 
+    # 面板 pin 的落点：默认跟随二进制 tag；--keep-ui 保持当前面板；
+    # --ui-tag 显式指定。写成与二进制同 tag 时回收成空串（「跟随」的默认写法），
+    # 免得仓库里留一行看着像冻结、实际等于当前的冗余 pin。
+    cur_ui_tag = build.upstream_ui_tag()
+    if ui_tag_arg:
+        target_ui_tag = ui_tag_arg
+        if not tag_exists(target_ui_tag, token):
+            raise SystemExit(f"ERROR: 上游没有 tag {target_ui_tag}（--ui-tag 指定）")
+    elif keep_ui:
+        target_ui_tag = cur_ui_tag
+    else:
+        # --force 重打当前版本时，不要顺手把已有的面板 pin 抹掉
+        target_ui_tag = "" if newer else str(getattr(build, "UPSTREAM_UI_TAG", "")).strip()
+    ui_tag = target_ui_tag or upstream_tag
+    if ui_tag == upstream_tag:
+        target_ui_tag = ""
+    log(f" 面板 pin: {cur_ui_tag} → {ui_tag}"
+        + ("（只更新服务端，面板保持不动）" if ui_tag != upstream_tag else ""))
+
     # 产物形态由**上游发没发官方包**决定：发了就用官方包（release），没发就从
     # 该 tag 源码编（source）。这里查不出来（限流/网络）时直接失败，绝不默认
     # 成 source —— 那会把一个本该用官方包的版本安静地编成源码构建。
@@ -713,6 +815,7 @@ def main():
         "upstream_version": target_up,
         "current_upstream_version": build.UPSTREAM_VERSION,
         "upstream_tag": upstream_tag,
+        "ui_tag": ui_tag,
         "app_version": app_version,
         "tag": f"v{app_version}",
     })
@@ -729,6 +832,9 @@ def main():
     else:
         log("  （--force：上游无新版本，pin 不变）")
     rewrite_bundle_mode(mode)
+    # 面板 pin 必须与二进制 pin 一起写：漏了它，--keep-ui 在 CLI 上看起来生效，
+    # 实际下一行 sync_webui() 还是跟着新 tag 取面板（静默回到成套升级）。
+    rewrite_ui_tag(target_ui_tag)
     load_build()
 
     # 官方包 sha256 只在 release 模式有意义：source 模式没有包可比，硬取 .sha256
@@ -765,7 +871,7 @@ def main():
 
     log("[5/6] 面板溯源复核 + 改 manifest（version + changelog）...")
     build.verify_webui_provenance()
-    text, changed = bump_manifest(upstream_tag, app_version, mode)
+    text, changed = bump_manifest(upstream_tag, app_version, mode, ui_tag=ui_tag)
     write_manifest(text)
     load_build()
 
@@ -793,6 +899,9 @@ def main():
                              "（.pyc 缓存未失效，或正则失配）")
     if build.UPSTREAM_UI_SHA256 != ui_hash:
         raise SystemExit("ERROR: 改完后 UPSTREAM_UI_SHA256 与实测树哈希不一致")
+    if build.upstream_ui_tag() != ui_tag:
+        raise SystemExit(f"ERROR: 改完后面板 tag={build.upstream_ui_tag()!r} != {ui_tag!r}"
+                         "（UPSTREAM_UI_TAG 改写失配）")
     log("")
     log(f" 完成：上游 {upstream_tag}，应用版本 {app_version}"
         f"{'，manifest 已更新' if changed else '，manifest 版本未变'}")

@@ -156,10 +156,12 @@ class WebuiGuardTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="webui-guard-")
         self._old_build_dir = build.BUILD_DIR
+        self._old_ui_tag = build.UPSTREAM_UI_TAG
         build.BUILD_DIR = self.root
 
     def tearDown(self):
         build.BUILD_DIR = self._old_build_dir
+        build.UPSTREAM_UI_TAG = self._old_ui_tag
         shutil.rmtree(self.root, ignore_errors=True)
 
     # --- 三种真实形态都必须通过 -------------------------------------------
@@ -249,6 +251,40 @@ class WebuiGuardTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 build.check_webui()
+
+
+class UiPinTest(unittest.TestCase):
+    """面板 pin 与二进制 pin 分离（「只更新服务端」）的基本行为。"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ui-pin-")
+        self._old_build_dir = build.BUILD_DIR
+        self._old_ui_tag = build.UPSTREAM_UI_TAG
+        build.BUILD_DIR = self.root
+
+    def tearDown(self):
+        build.BUILD_DIR = self._old_build_dir
+        build.UPSTREAM_UI_TAG = self._old_ui_tag
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_default_follows_binary_pin(self):
+        build.UPSTREAM_UI_TAG = ""
+        self.assertEqual(build.upstream_ui_tag(), build.UPSTREAM_TAG)
+        self.assertFalse(build.ui_is_pinned())
+
+    def test_pinned_uses_ui_pin_cache(self):
+        ui = make_ui_tree(self.root, legacy_manifest=False, combined=True)
+        pinned = os.path.join(self.root, "ui-pin", "v9.9.9", "ui")
+        os.makedirs(os.path.dirname(pinned), exist_ok=True)
+        shutil.move(ui, pinned)
+
+        build.UPSTREAM_UI_TAG = "v9.9.9"
+        self.assertTrue(build.ui_is_pinned())
+        src = build._upstream_ui_src("amd64")
+        self.assertEqual(os.path.abspath(src), os.path.abspath(pinned))
+        # 冻结的这棵树仍然要过全部面板预检（旧版本形态由 check_webui 兼容）
+        with contextlib.redirect_stdout(io.StringIO()):
+            build.check_webui()
 
 
 if __name__ == "__main__":

@@ -109,6 +109,26 @@ UPSTREAM_REPO = "aimod-cc/Agent2API"
 UPSTREAM_VERSION = "3.5.0"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
+# --- 面板 pin：可以独立于二进制 pin（「只更新服务端」）-----------------------
+#
+# 空串 = 跟随 UPSTREAM_TAG（默认）：二进制与面板出自上游同一次发布，这是上游
+# 自己验证过的配对组合。
+#
+# 写成具体 tag（如 "v3.4.2"）= 冻结面板、只更新服务端：
+#   · 二进制仍按 UPSTREAM_VERSION 取；
+#   · 面板按 UPSTREAM_UI_TAG 取（优先该 tag 的官方包，没包则用该 tag 源码的
+#     desktop-tauri/ui，见 fetch_ui_bundle()）；
+#   · UPSTREAM_UI_SHA256 记录的是**这棵被冻结的面板树**。
+#
+# 为什么可行：面板是纯静态资源，由 fngateway 起上游进程时用 AGENT2API_UI_DIR
+# 指过去（见 fngateway/main.go 的 childEnv），与二进制没有编译期绑定。所以
+# 「新二进制 + 旧面板」能跑；反过来不行 —— 新面板会调旧服务端没有的接口。
+#
+# 代价：旧面板看不到新功能，且上游若删改面板用到的接口/强制新流程，旧面板会
+# 局部报错。所以这个开关适合「上游面板大改、先把服务端升上去」的过渡版本，
+# 平时仍建议成套升级；`--keep-ui` 由 tools/bump_upstream.py 写入。
+UPSTREAM_UI_TAG = ""
+
 # --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
 # 候选池当时测了 5 个：直连、v4.gh-proxy.org、gh-proxy.com、ghfast.top、
 # gh.dpik.top。结论与踩过的坑都记在这里，免得下次有人「顺手加个镜像」。
@@ -133,11 +153,21 @@ GH_PROXY_FALLBACK = "https://gh.dpik.top/"
 
 # 上游源码 tarball 的下载地址（codeload 直连 + 加速源兜底）。
 # 只取 tag，不取 master —— 上游发布节奏很快，master 随时可能漂。
-UPSTREAM_URLS = (
-    f"https://codeload.github.com/{UPSTREAM_REPO}/tar.gz/refs/tags/{UPSTREAM_TAG}",
-    GH_PROXY + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
-    GH_PROXY_FALLBACK + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
-)
+def upstream_urls(tag=None):
+    """某个 tag 的源码 tarball 下载地址（直连 + 两个加速源）。
+
+    面板 pin 与二进制 pin 可以不同（见 UPSTREAM_UI_TAG），所以这里按 tag
+    参数化；不传就是当前二进制 pin。
+    """
+    t = tag or UPSTREAM_TAG
+    return (
+        f"https://codeload.github.com/{UPSTREAM_REPO}/tar.gz/refs/tags/{t}",
+        GH_PROXY + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{t}.tar.gz",
+        GH_PROXY_FALLBACK + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{t}.tar.gz",
+    )
+
+
+UPSTREAM_URLS = upstream_urls()
 
 # --- 上游官方 Linux 服务端包（二进制 + 面板的真实来源）---
 #
@@ -204,7 +234,18 @@ def upstream_mode():
     return mode
 
 
-def bundle_urls(arch):
+def upstream_ui_tag():
+    """面板实际使用的 tag：UPSTREAM_UI_TAG 为空时跟随二进制 pin。"""
+    t = str(UPSTREAM_UI_TAG).strip()
+    return t or UPSTREAM_TAG
+
+
+def ui_is_pinned():
+    """面板是否被钉在**另一个** tag 上（「只更新服务端」模式）。"""
+    return upstream_ui_tag() != UPSTREAM_TAG
+
+
+def bundle_urls(arch, tag=None):
     """官方服务端包的下载地址（GitHub 直连 + 两个加速源兜底）。
 
     加速源选型依据见文件头部 GH_PROXY 处的实测记录：v4 为主（与
@@ -212,8 +253,9 @@ def bundle_urls(arch):
     直连保留在链首：它在**部分**网络下可用（实测有 1.18 MB/s 的轮次），
     且不依赖第三方；失败时由后续两个加速源接住。
     """
+    t = tag or UPSTREAM_TAG
     asset = UPSTREAM_BUNDLE_ASSET.format(arch=arch)
-    direct = f"https://github.com/{UPSTREAM_REPO}/releases/download/{UPSTREAM_TAG}/{asset}"
+    direct = f"https://github.com/{UPSTREAM_REPO}/releases/download/{t}/{asset}"
     return (
         direct,
         GH_PROXY + direct,
@@ -223,6 +265,10 @@ def bundle_urls(arch):
 
 # 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 167 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
+#
+# 它钉的是 **upstream_ui_tag() 那棵面板树**：UPSTREAM_UI_TAG 为空时就是
+# UPSTREAM_TAG 的面板；被钉到别的 tag（只更新服务端）时，是那个 tag 的面板。
+# 所以每次换面板 pin 都要重算这个值（tools/bump_upstream.py 负责）。
 #
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
@@ -1105,6 +1151,113 @@ def fetch_server_bundle(arch, force=False):
     return out_dir
 
 
+def _ui_pin_dir():
+    """面板 pin 的缓存根目录（按当前 BUILD_DIR 动态取，便于测试与改工作目录）。"""
+    return os.path.join(BUILD_DIR, "ui-pin")
+
+
+def _download_first(urls, tarball, desc, force=False):
+    """按顺序试下载地址，第一个成功即返回 True（与 fetch_* 的镜像策略一致）。"""
+    if download(urls[0], tarball, desc, force=force):
+        return True
+    for alt in urls[1:]:
+        log(f"  换镜像重试: {alt}")
+        if download(alt, tarball, desc, force=True):
+            return True
+    return False
+
+
+def _extract_source_tarball(tarball, dest):
+    """解上游源码 tarball，剥掉顶层的 ``agent2api-<version>/``。"""
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    with tarfile.open(tarball, "r:gz") as t:
+        names = t.getnames()
+        tops = {n.split("/")[0] for n in names}
+        if len(tops) != 1:
+            log(f"  ERROR: 上游 tarball 顶层目录不唯一: {sorted(tops)}")
+            sys.exit(1)
+        strip = tops.pop() + "/"
+        members = [m for m in t.getmembers() if m.name.startswith(strip)]
+        for m in members:
+            m.name = m.name[len(strip):]
+        members = [m for m in members if m.name]
+        try:
+            t.extractall(dest, members=members, filter="data")
+        except TypeError:
+            t.extractall(dest, members=members)
+
+
+def fetch_ui_bundle(force=False):
+    """取**面板 pin**（UPSTREAM_UI_TAG）的 ui/，只在面板与二进制不同 tag 时用。
+
+    来源优先级与上游自己发布的方式一致：
+      1. 该 tag 的官方 Linux 服务端包（面板就在包里，且与二进制同一次构建）；
+      2. 该 tag 没有官方包时，回落到 tag 源码的 ``desktop-tauri/ui``。
+
+    这里**不**钉官方包的 sha256：面板 pin 是低频、人工选择的动作，再维护一张
+    每个 tag 的包哈希表没有收益；面板形态由 UPSTREAM_UI_SHA256 这道树哈希把关
+    （它覆盖「文件内容 + 相对路径」，换包/换镜像都会被发现）。
+
+    缓存目录按 tag 分开（``.local-build/ui-pin/<tag>/ui``），所以「只更新服务端」
+    的连续几次构建不会重复下载同一份旧面板。
+    """
+    tag = upstream_ui_tag()
+    if not ui_is_pinned():
+        return None
+    cache = os.path.join(_ui_pin_dir(), tag)
+    ui = os.path.join(cache, UPSTREAM_BUNDLE_UI)
+    if os.path.isdir(ui) and not force:
+        log(f"  复用面板 pin {tag} 的缓存: {ui}")
+        patch_sw_scope(ui)
+        return ui
+
+    os.makedirs(cache, exist_ok=True)
+    asset = UPSTREAM_BUNDLE_ASSET.format(arch="amd64")
+    tarball = os.path.join(cache, asset)
+    desc = f"面板 pin {tag} 官方包 {asset}"
+    if _download_first(bundle_urls("amd64", tag), tarball, desc, force=force):
+        tmp = os.path.join(cache, "extract")
+        if os.path.isdir(tmp):
+            shutil.rmtree(tmp)
+        with tarfile.open(tarball, "r:gz") as t:
+            try:
+                t.extractall(tmp, filter="data")
+            except TypeError:
+                t.extractall(tmp)
+        src = os.path.join(tmp, UPSTREAM_BUNDLE_UI)
+        if not os.path.isdir(src):
+            log(f"  ERROR: 面板 pin {tag} 的官方包里找不到 {UPSTREAM_BUNDLE_UI}/")
+            sys.exit(1)
+        if os.path.isdir(ui):
+            shutil.rmtree(ui)
+        shutil.copytree(src, ui)
+        shutil.rmtree(tmp, ignore_errors=True)
+        log(f"  面板 pin {tag} 就位（官方包）: {ui}")
+        patch_sw_scope(ui)
+        return ui
+
+    log(f"  [提示] 面板 pin {tag} 没有官方 Linux 包，改用该 tag 源码的 desktop-tauri/ui")
+    src_tar = os.path.join(cache, f"agent2api-{tag}.tar.gz")
+    if not _download_first(upstream_urls(tag), src_tar, f"面板 pin {tag} 源码", force=force):
+        log("  ERROR: 无法获取面板 pin 的产物（官方包与源码都失败）。")
+        log(f"    UPSTREAM_UI_TAG={tag}；也可手动把面板放到 {ui} 后重试。")
+        sys.exit(1)
+    extract_dir = os.path.join(cache, "src")
+    _extract_source_tarball(src_tar, extract_dir)
+    src = os.path.join(extract_dir, "desktop-tauri", "ui")
+    if not os.path.isdir(src):
+        log(f"  ERROR: 面板 pin {tag} 源码里找不到 desktop-tauri/ui/")
+        sys.exit(1)
+    if os.path.isdir(ui):
+        shutil.rmtree(ui)
+    shutil.copytree(src, ui)
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    log(f"  面板 pin {tag} 就位（源码）: {ui}")
+    patch_sw_scope(ui)
+    return ui
+
+
 def fetch_upstream(force=False):
     """取上游源码 tarball（tag 固定），解到 .local-build/upstream-src/。
 
@@ -1324,26 +1477,36 @@ def _sync_ui_tree(src, dst, origin):
 def sync_webui(arches=("amd64", "arm64")):
     """把上游面板同步进 app/ui/（本项目自加的条目不动）。
 
-    v3.1.0 起**面板与二进制同出自官方服务端包**：那个包里的 ui/ 与 tag 源码的
-    desktop-tauri/ui/ 实测逐字节一致（v3.1.0 时 208 文件全同、v3.2.0-beta.2 时
-    213 文件全同），所以用包里的更省一次
-    十几 MB 的源码下载，也保证「装进包的面板」与「编进包的二进制」来自同一次
-    上游发布。
+    默认（UPSTREAM_UI_TAG 为空）时面板与二进制同出自官方服务端包：包里的 ui/
+    与 tag 源码的 desktop-tauri/ui 实测逐字节一致，所以用包里的更省一次十几 MB
+    的源码下载，也保证两者来自同一次上游发布。
+
+    面板 pin 独立时（只更新服务端），面板取自 UPSTREAM_UI_TAG 那个 tag，由
+    _upstream_ui_src() / fetch_ui_bundle() 负责取包或源码，同步逻辑不变。
 
     没有网络、或只想要源码那份时，用 sync_webui_from_source()。
     """
     dst = os.path.join(PROJECT_DIR, "app", "ui")
-    total = 0
-    for arch in (arches or ("amd64",)):
-        out_dir = fetch_server_bundle(arch)
-        src = os.path.join(out_dir, UPSTREAM_BUNDLE_UI)
-        total = _sync_ui_tree(src, dst, f"官方包 {UPSTREAM_BUNDLE_ASSET.format(arch=arch)}")
-        break  # 两个架构的包内含同一份 ui/，同步一次即可
-    return total
+    # 面板来源统一走 _upstream_ui_src()：它在「面板 pin 与二进制不同 tag」时
+    # 会去取那个 tag 的包/源码，否则还是当前官方包。同步只做一次 —— 两个架构
+    # 的包内含同一份 ui/。
+    src = _upstream_ui_src("amd64")
+    if ui_is_pinned():
+        origin = f"面板 pin {upstream_ui_tag()}（二进制 pin {UPSTREAM_TAG}）"
+    else:
+        origin = f"官方包 {UPSTREAM_BUNDLE_ASSET.format(arch='amd64')}"
+    return _sync_ui_tree(src, dst, origin)
 
 
 def sync_webui_from_source():
-    """从上游 tag **源码**同步面板（desktop-tauri/ui → app/ui）。"""
+    """从上游 tag **源码**同步面板（desktop-tauri/ui → app/ui）。
+
+    面板 pin 独立时改走 sync_webui()：那个 tag 的源码树不在 SRC_DIR（那是二进制
+    pin 的源码），硬拷会把面板换回二进制版本，和 UPSTREAM_UI_SHA256 对不上。
+    """
+    if ui_is_pinned():
+        log(f"  面板 pin 为 {upstream_ui_tag()}，--sync-upstream-src 改取该 pin 的面板")
+        return sync_webui()
     src = os.path.join(SRC_DIR, "desktop-tauri", "ui")
     dst = os.path.join(PROJECT_DIR, "app", "ui")
     return _sync_ui_tree(src, dst, f"源码 {UPSTREAM_TAG}")
@@ -1368,19 +1531,24 @@ def verify_webui_provenance(arches=("amd64", "arm64")):
     树哈希把实际文件列表算进去，混进外来文件会让哈希变化从而报错，但报错信息
     只会说「哈希不一致」，读的人容易误判成「上游面板变了」而去悄悄更新哈希。
     """
+    seen = []
     for arch in arches:
         src = _upstream_ui_src(arch)
+        if src in seen:
+            continue  # 面板 pin 独立时两个架构共用同一份，不重复算
+        seen.append(src)
         got, entries = tree_hash(src, exclude_prefixes=())
-        log(f"  上游面板 [{arch}]: {len(entries)} 个文件, 树哈希 {got[:16]}…（{src}）")
+        label = "面板 pin" if ui_is_pinned() else "上游面板"
+        log(f"  {label} [{arch}]: {len(entries)} 个文件, 树哈希 {got[:16]}…（{src}）")
         if got != UPSTREAM_UI_SHA256:
-            log(f"  ERROR: 上游面板 [{arch}] 树哈希与钉住的值不一致（面板形态可能已变）。")
+            log(f"  ERROR: {label} [{arch}] 树哈希与钉住的值不一致（面板形态可能已变）。")
             log(f"    期望: {UPSTREAM_UI_SHA256}")
             log(f"    实际: {got}")
             log("    若确认是上游改了面板：先核对 fngateway 的子路径改写是否仍适用")
             log("    （HTML 资源引用形态 / localStorage 键名 / fetch 调用形态），再更新")
             log("    build.py 里的 UPSTREAM_UI_SHA256。")
             sys.exit(1)
-    log("  上游面板溯源校验通过（逐架构）")
+    log("  面板溯源校验通过")
 
 
 def _upstream_ui_src(arch="amd64", force=False):
@@ -1397,7 +1565,12 @@ def _upstream_ui_src(arch="amd64", force=False):
     面板已移出仓库（2026-10-20），所以这条路径是构建的**硬前置**：目录不在时
     会就地重取上游产物（release 模式下载官方包并校验钉住的 sha256）。取不到就
     报错退出，绝不会开出一个缺面板的包。
+
+    面板 pin 与二进制 pin 不同时（UPSTREAM_UI_TAG，见文件头），面板来自
+    ``.local-build/ui-pin/<tag>/ui`` 且两个架构共用一份 —— 这时忽略 arch。
     """
+    if ui_is_pinned():
+        return fetch_ui_bundle(force=force)
     src = os.path.join(BUILD_DIR, f"upstream-bundle-{arch}", UPSTREAM_BUNDLE_UI)
     if not os.path.isdir(src):
         log(f"  面板缓存缺失（{arch}），尝试重新取上游产物（模式 {upstream_mode()}）...")
@@ -1465,7 +1638,16 @@ def _upstream_ui_top_names(arch=None):
 
     arch 给了就优先读该架构的解包目录；两架构的面板实测逐字节相同，所以
     缺该架构时回落到另一个架构 / 源码目录均可。
+
+    面板 pin 独立时，进包的是那棵被冻结的树，白名单必须跟着它 —— 否则
+    verify_fpk 会拿新二进制包里的面板顶层层级去比旧面板，误报「混入外来条目」。
     """
+    if ui_is_pinned():
+        src = _upstream_ui_src(arch or "amd64")
+        if os.path.isdir(src):
+            return set(os.listdir(src))
+        return set()
+
     cands = []
     if arch:
         cands.append(os.path.join(BUILD_DIR, f"upstream-bundle-{arch}", UPSTREAM_BUNDLE_UI))
@@ -2188,6 +2370,9 @@ def main():
     ap.add_argument("--print-mode", action="store_true",
                     help="只打印当前 pin 的上游产物形态（release / source）后退出，"
                          "供 CI 决定要不要装 Rust 工具链")
+    ap.add_argument("--print-ui-tag", action="store_true",
+                    help="只打印面板实际使用的上游 tag（UPSTREAM_UI_TAG，空则跟随"
+                         "UPSTREAM_TAG）后退出，供 CI/排查区分「面板 pin」与「二进制 pin」")
     ap.add_argument("--force-upstream", action="store_true",
                     help="与 --sync-upstream / --fetch-binaries / --fetch-source 同用："
                          "忽略本地缓存重新下载")
@@ -2197,6 +2382,10 @@ def main():
     # stdout 只有 "release" / "source" 两个词。
     if args.print_mode:
         print(upstream_mode())
+        return
+
+    if args.print_ui_tag:
+        print(upstream_ui_tag())
         return
 
     version = args.version.strip() or read_manifest_version()

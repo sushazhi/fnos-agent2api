@@ -55,7 +55,10 @@ python build.py --fetch-source                   # source 模式：只拉 tag �
 python build.py --check                          # 全量预检（不联网、不打包）
 python build.py [--arch arm64] [--version X]     # 出 fpk
 python build.py --sync-upstream [--materialize-ui]  # 取产物+核对溯源；需要人工 diff 才写 app/ui
+python build.py --print-ui-tag                   # 面板实际用的 tag（可能被单独钉住）
 python tools\bump_upstream.py --detect|--apply    # 改齐几处 pin + manifest（含产物形态）
+python tools\bump_upstream.py --apply --keep-ui  # 只升服务端，面板保持当前 pin
+python tools\bump_upstream.py --apply --ui-tag v3.4.2  # 显式升/降面板（重算面板树哈希）
 cd fngateway; go vet ./...; go test ./...        # 37 个测试
 ```
 
@@ -80,9 +83,21 @@ cd fngateway; go vet ./...; go test ./...        # 37 个测试
 
 两种模式都发布本仓库的 `.fpk` Release —— 上游「发了什么」与「我们能装什么」不脱钩。另外两条守卫针对这条链路的真实事故：**启动冒烟**（起得来 + `/health` 200 + 日志无 `no reactor running`，专抓 v3.3.0-beta.5 那种「编译通过、启动即崩」）与**glibc 断言**（`readelf`/`objdump` 验 ≤ 2.36）。二进制 job 留在 `ubuntu-22.04`（glibc 2.35 < 2.36；24.04 的 2.39 会让自编产物在飞牛上报 `GLIBC_2.38 not found`）。应急开关：官方包装得上但跑不起来时，跑 `tools/bump_upstream.py --apply --force --force-source`（或派发 `check-upstream.yml` 勾 `force_source`）把这一版钉成源码构建。fpk 不可逐字节复现（`fnpack` tar 元数据带 mtime/uid），本地与 CI 哈希不同不是 bug。
 
+### 2.3.1 面板 pin 与二进制 pin 分离（「只更新服务端」）
+
+`build.py` 的 `UPSTREAM_UI_TAG` 默认是空串 —— 面板跟随二进制 tag，用上游自己验证过的配对组合。写成具体 tag（如 `v3.4.2`）就是**冻结面板、只升服务端**：
+
+- 面板是纯静态资源，由 fngateway 起上游进程时用 `AGENT2API_UI_DIR` 指过去，与二进制没有编译期绑定；
+- 二进制仍按 `UPSTREAM_VERSION` 取，面板按 `UPSTREAM_UI_TAG` 取（优先该 tag 官方包，没包则用该 tag 源码的 `desktop-tauri/ui`，见 `fetch_ui_bundle()`），`UPSTREAM_UI_SHA256` 钉的是**被冻结的那棵树**；
+- 缓存按 tag 分开（`.local-build/ui-pin/<tag>/ui`），连续几次「只升服务端」不会重复下载旧面板。
+
+它是可回滚的运维开关，不是长期策略：旧面板看不到新功能，上游若删改面板用到的接口或新增强制流程，旧面板会局部报错。反向（新面板 + 旧服务端）更糟 —— 必须成套升级。所以面板升级建议单独一次 `--ui-tag`，带下面的装配冒烟；失败只回滚面板 pin，不用降级服务端（服务端升级常伴随数据库迁移，降级更危险）。
+
 ### 2.4 构建期守卫
 
-「编译能过、真机才炸」的静默缺陷一律做成硬失败：文本卫生（CRLF/BOM）、manifest 取值里的 `;`、图标缺失、面板缺文件/根绝对路径/提供商图标缺失、面板树哈希漂移、上游版本不符、上游二进制与 bin sidecar 溯源不符（release 模式来自官方包，source 模式由本流水线自编）、四处契约不一致、二进制架构与替身检测、打包后解包复核（ELF/可执行位/权限/manifest 逐值）、workflow 静态错误、`bump_upstream.py` 改完仍读到旧常量（CPython 只按 mtime 整秒 + 字节数判 `.pyc`）。
+「编译能过、真机才炸」的静默缺陷一律做成硬失败：文本卫生（CRLF/BOM）、manifest 取值里的 `;`、图标缺失、**入口页引用闭合**（`index/login/m.html` 里每个站内引用——含 `srcset`——都必须能在面板树里解析到，不再钉“某版有哪些文件”）、i18n 按页面实际注入路径逐语言核、面板树哈希漂移、上游版本不符、上游二进制与 bin sidecar 溯源不符（release 模式来自官方包，source 模式由本流水线自编）、四处契约不一致、二进制架构与替身检测、打包后解包复核（ELF/可执行位/权限/manifest 逐值）、workflow 静态错误、`bump_upstream.py` 改完仍读到旧常量（CPython 只按 mtime 整秒 + 字节数判 `.pyc`）。
+
+守卫本身也有回归测试：`tools/test_webui_guard.py` 用合成树固定 3.3 / 3.4 / 3.5 三种真实 i18n 形态 + 六个负例，两个 workflow 都会先跑它。`tools/smoke_panel.py` 在打包前用**这个二进制 + 这份 app/ui** 起一次服务，确认入口页与它引用的每个静态资源都取得到（404 就是「打包成功、装上去半残」），但不等同于旧面板 + 新服务端的业务语义兼容测试。
 
 ## 3. 安装与使用
 
