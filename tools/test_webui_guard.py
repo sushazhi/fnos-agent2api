@@ -41,6 +41,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import build  # noqa: E402
+import smoke_panel  # noqa: E402
 
 LOCALES = ("en", "ja")
 
@@ -285,6 +286,41 @@ class UiPinTest(unittest.TestCase):
         # 冻结的这棵树仍然要过全部面板预检（旧版本形态由 check_webui 兼容）
         with contextlib.redirect_stdout(io.StringIO()):
             build.check_webui()
+
+
+class SmokePanelUiTest(unittest.TestCase):
+    """装配冒烟的「面板从哪来」：仓库 app/ui 不是完整面板，必须现场装配。
+
+    2026-11 实际事故：workflow 直接把 `--ui app/ui` 交给冒烟脚本，三条入口页
+    全 404，读起来像服务端坏了。仓库 app/ui 只有本项目条目，上游面板由
+    stage_ui() 注入 —— 这里把这个前提钉住。
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="smoke-panel-")
+        self._old_build_dir = build.BUILD_DIR
+        build.BUILD_DIR = self.root
+
+    def tearDown(self):
+        build.BUILD_DIR = self._old_build_dir
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_staged_ui_has_all_entry_pages(self):
+        make_ui_tree(self.root, legacy_manifest=False, combined=True)
+        dst = os.path.join(self.root, "staged", "ui")
+        with contextlib.redirect_stdout(io.StringIO()):
+            smoke_panel.stage_packaged_ui(dst)
+            self.assertTrue(smoke_panel.check_entry_files(dst))
+        for _, name in smoke_panel.ENTRY_PAGES:
+            self.assertTrue(os.path.isfile(os.path.join(dst, name)), name)
+        # 本项目条目也要盖在最上层（manifest.desktop_uidir=ui 依赖 config）
+        self.assertTrue(os.path.isfile(os.path.join(dst, "config")))
+        self.assertTrue(os.path.isfile(os.path.join(dst, "images", "icon_64.png")))
+
+    def test_repo_app_ui_is_not_a_complete_panel(self):
+        repo_ui = os.path.join(ROOT, "app", "ui")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(smoke_panel.check_entry_files(repo_ui))
 
 
 if __name__ == "__main__":

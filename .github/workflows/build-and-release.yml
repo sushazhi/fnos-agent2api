@@ -445,28 +445,31 @@ jobs:
           chmod +x .local-build/tools/fnpack
           echo "fnpack downloaded ($(stat -c%s .local-build/tools/fnpack) bytes)"
 
-      # 刷新 app/ui 到「进包形态」并跑全部预检。面板来源同样由模式决定：
-      #   release → 官方包里的 ui/（与二进制同出一次上游发布）；
+      # 取上游产物、核对面板溯源并跑全部预检。面板来源同样由模式决定：
+      #   release → 官方包里解出的 ui/（与二进制同出一次上游发布）；
       #   source  → 该 tag 源码的 desktop-tauri/ui（两种来源实测逐字节一致）。
+      # 产物落在 .local-build/upstream-bundle-<arch>/ui/；**仓库 app/ui 仍只有
+      # 本项目条目**（config、images），进包形态由 stage_ui() 在打包时组装。
       # 这一步同时是**上游漂移探针**：拿到的面板若与 build.py 钉住的树哈希不一致，
       # verify_webui_provenance() 会硬失败，逼我们人工确认「面板形态是否还是
       # fngateway 能改写的那一种」（升级路径上由 bump_upstream.py 重算并改钉子，
       # 所以这条主要拦的是「面板在别处被悄悄改动」）。
       #
-      # 注意它只写 app/ui、不碰 .local-build/bin —— 二进制来自上面的
+      # 注意它只写 .local-build/、不碰 .local-build/bin —— 二进制来自上面的
       # Download binaries 步骤（binaries job 的产物），不会被这一步覆盖。
       # source 模式下这一步会顺带下载 tag 源码（面板的来源），不装 Rust。
       - name: Sync upstream UI + preflight checks
         run: python3 build.py --sync-upstream
 
-      # 装配冒烟：用这个二进制 + 这份 app/ui 起一次服务，确认入口页与它引用的
-      # 每个静态资源都能取到（404 就是「打包成功、装上去半残」的形态）。
+      # 装配冒烟：用这个二进制 + 进包形态的面板起一次服务，确认入口页与它引用的
+      # 每个静态资源都能取到（404 就是「打包成功、装上去半残」的形态）。面板由
+      # 脚本自己 stage_ui() 现场装配 —— 别改成 --ui app/ui：仓库里那份只有
+      # config/images，三条入口页必然 404（2026-11 实际踩过）。
       # 它不校验旧面板 + 新服务端的业务语义（接口字段/流程变化），只回答装配问题。
       - name: Panel/server wiring smoke
         run: |
           python3 tools/smoke_panel.py \
-            --bin .local-build/bin/agent2api-server-linux-amd64 \
-            --ui app/ui
+            --bin .local-build/bin/agent2api-server-linux-amd64
 
       # 与本地构建走的是同一条打包路径（build.py），CI 只负责把二进制喂进
       # .local-build/bin —— 本地与 CI 不会出现「两边包不一样」。

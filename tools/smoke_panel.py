@@ -8,27 +8,39 @@
 两者都覆盖不到「把这份 ui/ 交给这个二进制，入口页和它引用的资源是不是真的
 能取到」。而这正是「面板能打包、装上去半残」的中间地带。
 
-本脚本在 CI 的 package job 里跑（那里二进制与 app/ui 都已就位）：
+面板从 2026-10-20 起不再进仓库：`app/ui/` 只有本项目的 `config` 与
+`images/`，上游面板由 `build.stage_ui()` 在构建时注入。所以**直接拿
+`--ui app/ui` 跑本脚本一定 404**（那不是一个完整面板，三条入口页都不存在）。
+默认行为因此是「现场按进包形态装配」：上游面板
+（`.local-build/upstream-bundle-<arch>/ui/`）+ 本项目条目装进临时目录，再交给
+二进制 —— 与 .fpk 里的那份同形。
 
-  1. 用 `AGENT2API_UI_DIR` 指向待打包的 app/ui 启动上游二进制；
-  2. `/health` 必须就绪；
-  3. `/`、`/login.html`、`/m.html` 必须 200；
-  4. 入口页里**每个站内相对引用**（css/js/图标/i18n 词典…）都必须 200 ——
+本脚本在 CI 的 package job 里跑（那里二进制与上游面板都已就位）：
+
+  1. 装配（或使用 `--ui` 指定的）完整面板目录，先静态确认三个入口页都在；
+  2. 用 `AGENT2API_UI_DIR` 指向它启动上游二进制；
+  3. `/health` 必须就绪；
+  4. `/`、`/login.html`、`/m.html` 必须 200；
+  5. 入口页里**每个站内相对引用**（css/js/图标/i18n 词典…）都必须 200 ——
      这一条直接对应「子路径部署下 404 白屏」的历史事故；
-  5. `/api/panel/status` 不能 404（401/403 说明路由在，只是没登录）。
+  6. `/api/panel/status` 不能 404（401/403 说明路由在，只是没登录）。
 
 它**不**验证旧面板 + 新服务端的业务语义（接口字段/流程变化）—— 那需要真机
 或浏览器级测试，属于另一层。这里只回答一个能确定性回答的问题：装配有没有
 把「页面要的东西」服务出来。
 
 用法：
-    python3 tools/smoke_panel.py --bin .local-build/bin/agent2api-server-linux-amd64 \\
-        --ui app/ui
+    # 默认：现场装配进包形态面板（CI 的 package job 走这条）
+    python3 tools/smoke_panel.py \\
+        --bin .local-build/bin/agent2api-server-linux-amd64
+
+    # 已有完整面板目录（例如手工解包出来的 ui/）时直接指定
+    python3 tools/smoke_panel.py --bin <bin> --ui /path/to/ui
 """
 
 import argparse
-import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -37,10 +49,19 @@ import time
 import urllib.error
 import urllib.request
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import build  # noqa: E402  （复用 _local_asset_refs，口径与构建期预检一致）
+import build  # noqa: E402  （复用 _local_asset_refs / stage_ui，口径与构建一致）
+
+# 入口页：(URL 路径, 面板目录里的文件名)。前者进 HTTP 请求，后者做静态预检。
+ENTRY_PAGES = (
+    ("/", "index.html"),
+    ("/login.html", "login.html"),
+    ("/m.html", "m.html"),
+)
 
 
 def free_port():
@@ -72,22 +93,46 @@ def wait_health(base, proc, timeout=25.0):
     return False
 
 
-def main():
-    ap = argparse.ArgumentParser(description="面板/服务端装配冒烟")
-    ap.add_argument("--bin", required=True, help="上游 agent2api-server 二进制")
-    ap.add_argument("--ui", required=True, help="待打包的面板目录（app/ui）")
-    ap.add_argument("--keep", action="store_true", help="保留临时目录（排查用）")
-    args = ap.parse_args()
+def stage_packaged_ui(dst):
+    """按进包形态装配面板：上游面板 + 本项目 app/ui 本地条目。"""
+    print("  未指定 --ui：现场装配进包形态面板（上游面板 + 本项目条目）...")
+    build.stage_ui("amd64", dst)
 
-    if not os.path.isfile(args.bin):
-        print(f"ERROR: 找不到二进制: {args.bin}")
-        return 1
-    if not os.path.isdir(args.ui):
-        print(f"ERROR: 找不到面板目录: {args.ui}")
-        return 1
 
-    ui = os.path.abspath(args.ui)
-    tmp = tempfile.mkdtemp(prefix="panel-smoke-")
+def check_entry_files(ui):
+    """静态确认三个入口页都在。
+
+    这一步是**诊断**，不是冗余检查：入口页缺失时二进制只会回 404，而 404
+    读起来像「服务端坏了」，实际是「给它的根本不是完整面板」。先在这里说清楚。
+    """
+    missing = [name for _, name in ENTRY_PAGES
+               if not os.path.isfile(os.path.join(ui, name))]
+    if not missing:
+        return True
+    print(f"ERROR: 这不是一份完整面板（缺 {', '.join(missing)}）: {ui}")
+    print("  仓库里的 app/ui/ 只有本项目条目（config、images/），上游面板由")
+    print("  build.stage_ui() 在构建时注入 —— 直接把它交给二进制必然白屏。")
+    print("  省略 --ui 让本脚本现场装配，或先跑：")
+    print("    python build.py --sync-upstream --materialize-ui")
+    print("  再把 --ui 指向 app/ui。")
+    return False
+
+
+def run(args, tmp):
+    if args.ui:
+        ui = os.path.abspath(args.ui)
+        if not os.path.isdir(ui):
+            print(f"ERROR: 找不到面板目录: {ui}")
+            return 1
+    else:
+        ui = os.path.join(tmp, "ui")
+        stage_packaged_ui(ui)
+
+    if not check_entry_files(ui):
+        return 1
+    file_count = sum(len(files) for _, _, files in os.walk(ui))
+    print(f"  面板目录: {ui}（{file_count} 个文件）")
+
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     log_path = os.path.join(tmp, "server.log")
@@ -115,7 +160,7 @@ def main():
         else:
             # 1) 入口页
             pages = {}
-            for page in ("/", "/login.html", "/m.html"):
+            for page, _ in ENTRY_PAGES:
                 status, body = http_get(base + page)
                 pages[page] = body
                 if status != 200 or not body:
@@ -153,16 +198,40 @@ def main():
         print("ERROR: 面板/服务端装配冒烟未通过：")
         for p in problems:
             print(f"  - {p}")
-        print("  服务端日志（尾部 40 行）：")
+        print(f"  服务端日志（{log_path}，尾部 40 行）：")
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f.readlines()[-40:]:
                 print("    " + line.rstrip())
         return 1
     print("装配冒烟通过：入口页与引用资源均可取，status 路由存在")
-    if not args.keep:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
     return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="面板/服务端装配冒烟")
+    ap.add_argument("--bin", required=True, help="上游 agent2api-server 二进制")
+    ap.add_argument("--ui",
+                    help="完整面板目录；省略则用 build.stage_ui() 现场装配进包形态")
+    ap.add_argument("--keep", action="store_true", help="保留临时目录（排查用）")
+    args = ap.parse_args()
+
+    if not os.path.isfile(args.bin):
+        print(f"ERROR: 找不到二进制: {args.bin}")
+        return 1
+
+    tmp = tempfile.mkdtemp(prefix="panel-smoke-")
+    try:
+        code = run(args, tmp)
+    except BaseException:
+        # 装配/启动阶段的意外（含 build.stage_ui 的 sys.exit）保留现场，便于排查。
+        print(f"  临时目录保留: {tmp}")
+        raise
+    # 失败时同样保留：服务端日志是唯一能说明「为什么 404」的证据（与旧行为一致）。
+    if code == 0 and not args.keep:
+        shutil.rmtree(tmp, ignore_errors=True)
+    else:
+        print(f"  临时目录保留: {tmp}")
+    return code
 
 
 if __name__ == "__main__":
