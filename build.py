@@ -106,7 +106,7 @@ APP_NAME = "agent2api"
 #  v3.0.8，而 3.0.8 < 3.3.0-beta.4 恒成立，于是每天判定「已是最新」，
 #  beta.5 根本进不了候选集 —— 就是「Actions 检查不到上游更新」的真因。）
 UPSTREAM_REPO = "aimod-cc/Agent2API"
-UPSTREAM_VERSION = "3.5.0"
+UPSTREAM_VERSION = "3.5.1"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # --- 面板 pin：可以独立于二进制 pin（「只更新服务端」）-----------------------
@@ -183,8 +183,8 @@ UPSTREAM_URLS = upstream_urls()
 # 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
 UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
 UPSTREAM_BUNDLE_SHA256 = {
-    "amd64": "ab4417bbb0058966de19df08e722332eb135ade37d7c164fb50182e9373c966c",
-    "arm64": "856425263c23ea3b73b187339abe7f1d903729bf393219fc0703127527672c69",
+    "amd64": "1db08fb0345499a34d08e36d90135bf050c3c06d3378d02e5b3932c4eb1d9273",
+    "arm64": "d639141369ef59181ff3beaea205b297114721653b6ebf283cdd0267f46a1573",
 }
 
 # --- 上游产物形态：有官方包用官方包，没有就从 tag 源码编 ---
@@ -273,7 +273,7 @@ def bundle_urls(arch, tag=None):
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "86b75fdc854dec9c910f8b9815898cd36fbe707c0ad2e79565b25dae404024ea"
+UPSTREAM_UI_SHA256 = "b2e1e2367dbf38aeb3948c6fbc86c21b6084a596a1e80a27c1d04b94e844c8c6"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 #
